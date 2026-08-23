@@ -134,7 +134,7 @@ jobs:
           # not undo, so the non-zero exit being asserted ended the step at this
           # command and none of the assertions below it had ever run.
           set +e
-          ./reach.exe up ssh://reach-nonexistent.invalid/tmp/x --name smoke > out.txt 2>&1
+          ./reach.exe up ssh://reach-nonexistent.invalid//tmp/x --name smoke > out.txt 2>&1
           status=$?
           set -e
           cat out.txt

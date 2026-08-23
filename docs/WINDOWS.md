@@ -144,7 +144,7 @@ On a Windows machine with an agent installed and a POSIX host to reach:
 go build -o reach.exe ./cmd/reach
 
 # Does it reach the host, and did it get multiplexing?
-.\reach.exe up ssh://your-host/srv/app
+.\reach.exe up your-host:/srv/app
 .\reach.exe doctor
 
 # Do commands run there rather than here?

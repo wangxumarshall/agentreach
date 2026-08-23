@@ -46,19 +46,26 @@ HARNESSES
   harness verify claude|codex|kimi|goose|gemini|grok   probe whether this harness's shell routes through reach
 
 TARGETS
-  build-box                            an ssh_config alias; work where a login lands
-  ssh://[user@]host[:port]/abs/path    a remote host over SSH
-  docker://container/abs/path          a container
-  local:///abs/path                    this machine (for testing)
-  user@host:/abs/path                  scp-style shorthand
+  build-box                        an ssh_config alias; work where a login lands
+  [user@]host:path                 a remote host over SSH, scp's spelling
+  ssh://[user@]host[:port]/path    the same, OpenSSH's URI spelling
+  docker://container/path          a container
+  local:///abs/path                this machine (for testing)
+
+  Paths mean what scp and docker cp mean by them. For a host, a path is
+  relative to where a login lands unless it starts with a slash — box:app is
+  ~/app, box:/srv/app is /srv/app, and in a URI the slash that ends the host is
+  a delimiter, so ssh://box//srv/app is the absolute one. For a container, a
+  path is relative to / and the leading slash is optional.
 
   Session flags may follow the target, before the command:
   --name --mode --fileops --timeout --fresh
 
 EXAMPLES
   reach build-box claude                        Claude Code, working on build-box
-  reach ssh://build-box/srv/app claude          ... in a directory you name
-  reach client-box:/srv/app codex               scp-style, with a path
+  reach build-box:src/app claude                ... in ~/src/app there
+  reach build-box:/srv/app claude               ... or in a directory from the root
+  reach ssh://build-box:2222//srv/app codex     the URI spelling, when a port is needed
   reach build-box exec -- go test ./...
   reach status                                  every session, and where each points
 

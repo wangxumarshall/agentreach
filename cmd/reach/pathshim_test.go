@@ -9,7 +9,7 @@ import (
 
 func testSession(t *testing.T, workspace string) *session.Session {
 	t.Helper()
-	target, err := session.ParseTarget("ssh://box" + workspace)
+	target, err := session.ParseTarget("box:" + workspace)
 	if err != nil {
 		t.Fatalf("ParseTarget: %v", err)
 	}

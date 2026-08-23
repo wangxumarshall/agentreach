@@ -26,7 +26,7 @@ func localShell() (string, error) {
 	return "", fmt.Errorf(
 		"a local:// target needs a POSIX shell, and Windows is not a supported target.\n" +
 			"reach on Windows is meant to drive a *remote* POSIX host: point it at\n" +
-			"ssh://host/path instead. If you genuinely want this machine to be the target\n" +
+			"host:/path instead. If you genuinely want this machine to be the target\n" +
 			"and have Git for Windows or MSYS2, set REACH_LOCAL_SHELL to its bash.exe —\n" +
 			"expect MSYS path translation to change what absolute paths mean")
 }

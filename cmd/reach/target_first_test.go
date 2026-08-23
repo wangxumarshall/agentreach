@@ -82,8 +82,10 @@ func TestResolveTargetSpec(t *testing.T) {
 		host      string
 		workspace string
 	}{
-		{"ssh://box/srv/app", session.KindSSH, "box", "/srv/app"},
+		{"ssh://box//srv/app", session.KindSSH, "box", "/srv/app"},
 		{"box:/srv/app", session.KindSSH, "box", "/srv/app"},
+		// Relative to where a login lands, which Probe resolves.
+		{"box:srv/app", session.KindSSH, "box", "srv/app"},
 		{"local:///tmp/x", session.KindLocal, "", "/tmp/x"},
 		// A bare alias is a target because the operator's own ssh config says
 		// it is a machine. The absent path is resolved by Probe.
@@ -189,9 +191,9 @@ func TestRemovedFlagExplainsItself(t *testing.T) {
 
 func TestDeriveSessionName(t *testing.T) {
 	for _, tc := range []struct{ spec, want string }{
-		{"ssh://build-box/srv/app", "build-box-app"},
+		{"build-box:/srv/app", "build-box-app"},
 		{"ssh://build-box", "build-box"},
-		{"ssh://build.example.com/opt/site", "build.example.com-site"},
+		{"build.example.com:/opt/site", "build.example.com-site"},
 		{"root@10.0.0.9:/srv/app", "10.0.0.9-app"},
 		{"docker://c1/work", "c1-work"},
 		{"local:///tmp/x", "local-x"},
@@ -235,14 +237,14 @@ func TestPickSessionNameKeepsTargetsApart(t *testing.T) {
 	}
 
 	// Nothing saved yet: the derived name is free.
-	if got := pickSessionName("box-app", target("ssh://box/srv/app")); got != "box-app" {
+	if got := pickSessionName("box-app", target("box:/srv/app")); got != "box-app" {
 		t.Errorf("first use took %q", got)
 	}
-	save("box-app", "ssh://box/srv/app")
+	save("box-app", "box:/srv/app")
 
 	// The same target again is the same session, which is what makes running
 	// a second command against a box free.
-	if got := pickSessionName("box-app", target("ssh://box/srv/app")); got != "box-app" {
+	if got := pickSessionName("box-app", target("box:/srv/app")); got != "box-app" {
 		t.Errorf("reuse took %q, want box-app", got)
 	}
 	// A path with no path given matches whatever the session resolved.
@@ -251,7 +253,7 @@ func TestPickSessionNameKeepsTargetsApart(t *testing.T) {
 	}
 	// A different directory on the same host derives the same name and must
 	// not take it.
-	if got := pickSessionName("box-app", target("ssh://box/opt/app")); got != "box-app-2" {
+	if got := pickSessionName("box-app", target("box:/opt/app")); got != "box-app-2" {
 		t.Errorf("a second target took %q, want box-app-2", got)
 	}
 }
@@ -269,19 +271,53 @@ func TestSameTarget(t *testing.T) {
 		have, want string
 		same       bool
 	}{
-		{"ssh://box/srv/app", "ssh://box/srv/app", true},
-		{"ssh://box/srv/app", "ssh://box/opt/app", false},
-		{"ssh://box/srv/app", "ssh://other/srv/app", false},
-		{"ssh://root@box/srv/app", "ssh://box/srv/app", false},
-		{"ssh://box:22/srv/app", "ssh://box/srv/app", false},
+		{"box:/srv/app", "box:/srv/app", true},
+		{"box:/srv/app", "box:/opt/app", false},
+		{"box:/srv/app", "other:/srv/app", false},
+		{"root@box:/srv/app", "box:/srv/app", false},
+		{"ssh://box:22//srv/app", "box:/srv/app", false},
 		// An unstated workspace matches the one the session resolved: asking
 		// the host again for a directory it already answered for costs a round
 		// trip to learn nothing.
-		{"ssh://box/home/me", "ssh://box", true},
+		{"box:/home/me", "ssh://box", true},
 	} {
 		if got := sameTarget(parse(tc.have), parse(tc.want)); got != tc.same {
 			t.Errorf("sameTarget(%q, %q) = %v", tc.have, tc.want, got)
 		}
+	}
+}
+
+// A relative spec names a place only the target can point to, and running the
+// same command twice must find the session the first run made rather than
+// probing the host again and opening a second one beside it.
+func TestSameTargetResolvesARelativeSpecAgainstTheSession(t *testing.T) {
+	probed := &session.Target{
+		Kind: session.KindSSH, Host: "box",
+		Workspace: "/home/me/app", LoginDir: "/home/me",
+	}
+	want := func(spec string) *session.Target {
+		t.Helper()
+		got, err := session.ParseTarget(spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	if !sameTarget(probed, want("box:app")) {
+		t.Error("box:app did not match the session it resolved to")
+	}
+	if !sameTarget(probed, want("ssh://box/app")) {
+		t.Error("ssh://box/app did not match the session it resolved to")
+	}
+	if sameTarget(probed, want("box:other")) {
+		t.Error("box:other matched a session working somewhere else")
+	}
+
+	// A session written before reach recorded the login directory cannot
+	// answer, and re-probing is the safe half of the wrong answer.
+	older := &session.Target{Kind: session.KindSSH, Host: "box", Workspace: "/home/me/app"}
+	if sameTarget(older, want("box:app")) {
+		t.Error("matched a relative spec against a session that never recorded where a login lands")
 	}
 }
 
@@ -398,7 +434,7 @@ func TestUnknownWordIsReportedAsBothReadings(t *testing.T) {
 	if code != 2 {
 		t.Errorf("exit code = %d, want 2", code)
 	}
-	for _, want := range []string{"unknown command", "reach help", "ssh://"} {
+	for _, want := range []string{"unknown command", "reach help", "stauts:/srv/app"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("message does not mention %q:\n%s", want, msg)
 		}

@@ -173,9 +173,9 @@ Set `REACH_HELPER_BINARY` to use a build you produced yourself.
 ## Negotiation
 
 ```console
-reach up ssh://host/srv/app                  # negotiate the best proven tier
-reach up ssh://host/srv/app --fileops=posix  # pin tier 0 — install nothing, touch nothing
-reach up ssh://host/srv/app --fileops=helper  # opt in to the auto-installed helper
+reach up host:/srv/app                  # negotiate the best proven tier
+reach up host:/srv/app --fileops=posix  # pin tier 0 — install nothing, touch nothing
+reach up host:/srv/app --fileops=helper  # opt in to the auto-installed helper
 ```
 
 Negotiation order is `pipe`, then `posix`, chosen by measurement against a real
