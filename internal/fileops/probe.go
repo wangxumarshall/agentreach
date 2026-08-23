@@ -72,8 +72,45 @@ type Capabilities struct {
 // probeScript is intentionally a single POSIX-sh program with no pipelines
 // that depend on the very utilities it is testing for. It prints KEY=VALUE
 // lines and must never fail: an absent tool is a value, not an error.
+//
+// It is one program because every command reach sends is a round trip, and a
+// round trip is expensive even on a connection that is already open: measured
+// against a host 200 ms away, ~0.5 s for a channel on an established master
+// against ~0.2 s for a command on a channel that is already running. The cost
+// is the channel handshake, which multiplexing does not remove. Asking these
+// questions one at a time cost four of those to learn what one shell answers
+// in 0.69 s.
+//
+// Order matters in three places. Stdin is put aside on fd 3 before anything
+// runs, because the raw-stdin measurement is the only thing entitled to read
+// it and a login profile that reads stdin would otherwise eat it. The login
+// PATH is settled next and applied to the rest of the program, so what reach
+// finds here is what reach can run later. And the raw-stdout measurement is
+// last, because it is binary: anything printed after it would have to be
+// recovered from inside it.
 const probeScript = `
+exec 3<&0 </dev/null
 w_has() { command -v "$1" >/dev/null 2>&1; }
+printf 'PLAINPATH=%s\n' "$PATH"
+
+# A profile that hangs must cost reach the login PATH, not the whole probe.
+# There is no portable timeout, so this is best-effort by design.
+__reach_to=''
+if w_has timeout; then __reach_to='timeout 10'; fi
+w_login_path() {
+  # Prefer the operator's own shell; fall back to sh. Either may be absent or
+  # may refuse to be a login shell, and neither is worth failing the probe over.
+  for s in "$SHELL" /bin/bash /bin/sh; do
+    [ -n "$s" ] && [ -x "$s" ] || continue
+    p=$($__reach_to "$s" -lc 'printf %s "$PATH"' 2>/dev/null) || continue
+    [ -n "$p" ] && { printf '%s' "$p"; return 0; }
+  done
+  return 1
+}
+__reach_lp=$(w_login_path 2>/dev/null)
+printf 'LOGINPATH=%s\n' "$__reach_lp"
+if [ -n "$__reach_lp" ]; then PATH=$__reach_lp; fi
+
 printf 'UNAME=%s\n' "$(uname -sm 2>/dev/null || echo unknown)"
 
 if stat -c '%s' / >/dev/null 2>&1; then printf 'STAT=gnu\n'
@@ -102,13 +139,15 @@ printf 'CACHE=%s\n' "${XDG_CACHE_HOME:-$HOME/.cache}"
 if printf 'x\n' | grep -I x >/dev/null 2>&1; then printf 'GREPI=-I\n'
 else printf 'GREPI=\n'; fi
 
-if w_has sha256sum; then printf 'SHA=sha256sum\n'
-elif w_has shasum; then printf 'SHA=shasum -a 256\n'
-elif w_has openssl; then printf 'SHA=openssl dgst -sha256 -r\n'
-else printf 'SHA=\n'; fi
+if w_has sha256sum; then __reach_sha='sha256sum'
+elif w_has shasum; then __reach_sha='shasum -a 256'
+elif w_has openssl; then __reach_sha='openssl dgst -sha256 -r'
+else __reach_sha=''; fi
+printf 'SHA=%s\n' "$__reach_sha"
 `
 
-// loginPathScript asks the target what PATH the operator would actually have.
+// The login PATH deserves its own note, since the probe reads as though it
+// asks the same question twice.
 //
 // `ssh host command` runs a non-interactive shell, which on Debian and Ubuntu
 // returns from ~/.bashrc before reaching anything that edits PATH. So reach saw
@@ -122,79 +161,9 @@ else printf 'SHA=\n'; fi
 // capability as absent when it is present, and degrading on that basis, is the
 // failure this project exists to avoid.
 //
-// The login shell is asked once, with a timeout, and its answer is used for
-// every command afterwards — detection and execution together, so reach can
-// never find a tool during the probe that it then cannot run.
-const loginPathScript = `
-w_login_path() {
-  # Prefer the operator's own shell; fall back to sh. Either may be absent or
-  # may refuse to be a login shell, and neither is worth failing the probe over.
-  for s in "$SHELL" /bin/bash /bin/sh; do
-    [ -n "$s" ] && [ -x "$s" ] || continue
-    p=$("$s" -lc 'printf %s "$PATH"' 2>/dev/null) || continue
-    [ -n "$p" ] && { printf '%s' "$p"; return 0; }
-  done
-  return 1
-}
-printf 'LOGINPATH=%s\n' "$(w_login_path 2>/dev/null)"
-`
-
-// Probe inspects a target's userland.
-func Probe(ctx context.Context, t transport.Transport) (*Capabilities, error) {
-	loginPath := detectLoginPath(ctx, t)
-	// Detection runs under the login PATH, so what reach finds is what the
-	// operator would find.
-	res, err := t.Run(ctx, reach.ExecRequest{Command: probeScript, Env: pathEnv(loginPath)})
-	if err != nil {
-		return nil, fmt.Errorf("probe target: %w", err)
-	}
-	if res.Code != 0 {
-		return nil, fmt.Errorf("probe target: shell exited %d: %s", res.Code, strings.TrimSpace(string(res.Stderr)))
-	}
-	c := &Capabilities{}
-	for _, line := range strings.Split(string(res.Stdout), "\n") {
-		k, v, ok := strings.Cut(strings.TrimSpace(line), "=")
-		if !ok {
-			continue
-		}
-		switch k {
-		case "UNAME":
-			c.Uname = v
-		case "STAT":
-			c.StatFlavor = v
-		case "B64D":
-			c.Base64Decode = v
-		case "B64E":
-			c.Base64Encode = v
-		case "FIND":
-			c.HasFind = v == "1"
-		case "FINDPF":
-			c.FindPrintf = v == "1"
-		case "XARGS":
-			c.HasXargs = v == "1"
-		case "PY3":
-			c.Python3 = v == "1"
-		case "RG":
-			c.Ripgrep = v
-		case "GREPI":
-			c.GrepSkipBinary = v
-		case "CACHE":
-			c.CacheDir = v
-		case "SHA":
-			c.SHA256 = v
-		}
-	}
-	if c.Base64Decode == "" || c.Base64Encode == "" {
-		return c, fmt.Errorf(
-			"target has no base64 and no openssl: reach cannot move file content safely.\n"+
-				"Binary-safe transfer needs one of them; without it, content would have to be\n"+
-				"passed through the shell unencoded, which corrupts any file containing NUL or\n"+
-				"invalid UTF-8. Target reports: %s", c.Uname)
-	}
-	c.LoginPath = loginPath
-	c.RawStdin, c.RawStdout = probeRawIO(ctx, t, c)
-	return c, nil
-}
+// Both PATHs are reported because only their difference matters: a login shell
+// that adds nothing is not worth overriding anything for, and the override is
+// what every later command carries.
 
 // rawProbeBlob is every byte value, plus the sequences a transport is most
 // likely to mangle: a lone CR, a lone LF, CRLF, and a trailing newline that a
@@ -207,81 +176,150 @@ func rawProbeBlob() []byte {
 	return append(b, '\r', '\n', '\r', '\n', 0x00, 0xff, '\n')
 }
 
-// probeRawIO asks whether binary content survives the transport unencoded.
+// rawProbeMark separates the two raw-I/O answers, which share the probe's one
+// round trip.
+//
+// It cannot occur in either half, which is what lets each be read without
+// reference to the other: the first half is a digest command's output, hex and
+// a filename, and the second is rawProbeBlob, which never repeats a byte
+// adjacently — so a marker containing a doubled character is not a substring of
+// it. A transport that garbles one half therefore still gives an honest answer
+// about the other.
 //
 // reach has always base64-framed file content, which is unconditionally safe
 // and costs a third of the bandwidth in both directions. Whether it is
 // *necessary* is a property of the transport, and transports differ: an ssh
 // session with no pty is 8-bit clean, while a pty translates newlines, and
 // Windows ssh clients have historically translated on their own. So it is
-// measured per target instead of assumed either way.
+// measured per target instead of assumed either way, and neither direction
+// writes anything to the target: stdin fidelity is checked by piping the blob
+// into the target's own digest command, stdout fidelity by having the target
+// print it back. A target that garbles either simply keeps base64.
+const rawProbeMark = "__reach_raw__"
+
+// rawIOTail measures both directions of transport fidelity and must be the
+// last thing the probe prints. See probeScript for why, and rawProbeMark for
+// how the two answers stay independent.
+const rawIOTail = `
+printf 'DIGEST='
+if [ -n "$__reach_sha" ]; then
+  # Unquoted on purpose: the value is one of the fixed set chosen above, and
+  # two of those are a command plus an argument.
+  $__reach_sha <&3 2>/dev/null
+else
+  printf '\n'
+fi
+printf %s ` + "'" + rawProbeMark + `'
+printf `
+
+// Probe inspects a target's userland.
+func Probe(ctx context.Context, t transport.Transport) (*Capabilities, error) {
+	c, _, err := ProbeWith(ctx, t, "")
+	return c, err
+}
+
+// ProbeWith inspects a target's userland and answers the caller's own
+// questions in the same round trip.
 //
-// Neither direction writes anything to the target. Stdin fidelity is checked by
-// piping the blob into the target's own digest command and comparing; stdout
-// fidelity by having the target print the blob and comparing bytes. A target
-// that garbles either simply keeps base64.
-func probeRawIO(ctx context.Context, t transport.Transport, c *Capabilities) (stdin, stdout bool) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	blob := rawProbeBlob()
-
-	if c.SHA256 != "" {
-		sum := sha256.Sum256(blob)
-		res, err := t.Run(ctx, reach.ExecRequest{
-			Command:   c.SHA256,
-			Stdin:     blob,
-			Env:       pathEnv(c.LoginPath),
-			MaxOutput: 4 << 10,
-		})
-		if err == nil && res.Code == 0 {
-			fields := strings.Fields(string(res.Stdout))
-			stdin = len(fields) > 0 &&
-				strings.TrimPrefix(fields[0], "\\") == hex.EncodeToString(sum[:])
-		}
+// extra is POSIX sh spliced in after the login PATH has been applied and
+// before the binary tail. It must print KEY=VALUE lines, must not fail, and
+// must not read stdin, which belongs to the raw-stdin measurement; its answers
+// come back in the returned map alongside the ones reach reads itself. It
+// exists because the workspace check is a question about the same target
+// asked at the same moment, and a second round trip for it would cost more
+// than everything this probe measures.
+func ProbeWith(ctx context.Context, t transport.Transport, extra string) (*Capabilities, map[string]string, error) {
+	res, err := t.Run(ctx, probeRequest(extra))
+	if err != nil {
+		return nil, nil, fmt.Errorf("probe target: %w", err)
 	}
+	if res.Code != 0 {
+		return nil, nil, fmt.Errorf("probe target: shell exited %d: %s",
+			res.Code, strings.TrimSpace(string(res.Stderr)))
+	}
+	return parseProbe(res.Stdout)
+}
 
+// probeTimeout is a backstop, not a budget. Every question the probe asks is
+// individually bounded or cannot block; this is here so that a target which
+// accepts the command and then says nothing at all fails rather than hanging
+// the operator's terminal.
+const probeTimeout = 2 * time.Minute
+
+// probeRequest renders the whole probe as one command and the stdin it reads.
+func probeRequest(extra string) reach.ExecRequest {
+	blob := rawProbeBlob()
 	// printf with octal escapes is POSIX and needs nothing installed.
 	var esc strings.Builder
 	for _, b := range blob {
 		fmt.Fprintf(&esc, "\\%03o", b)
 	}
-	res, err := t.Run(ctx, reach.ExecRequest{
-		Command:   "printf " + transport.ShellQuote(esc.String()),
-		Env:       pathEnv(c.LoginPath),
-		MaxOutput: 64 << 10,
-	})
-	if err == nil && res.Code == 0 {
-		stdout = bytes.Equal(res.Stdout, blob)
+	var cmd strings.Builder
+	cmd.WriteString(probeScript)
+	if extra != "" {
+		cmd.WriteString("\n")
+		cmd.WriteString(extra)
+		cmd.WriteString("\n")
 	}
-	return stdin, stdout
+	cmd.WriteString(rawIOTail)
+	cmd.WriteString(transport.ShellQuote(esc.String()))
+	cmd.WriteString("\n")
+	return reach.ExecRequest{
+		Command:   cmd.String(),
+		Stdin:     blob,
+		MaxOutput: 256 << 10,
+		Timeout:   probeTimeout,
+	}
 }
 
-// detectLoginPath returns the login shell's PATH when it adds anything, or ""
-// when it matches what a plain command already gets.
-func detectLoginPath(ctx context.Context, t transport.Transport) string {
-	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-
-	res, err := t.Run(ctx, reach.ExecRequest{Command: loginPathScript, MaxOutput: 64 << 10})
-	if err != nil || res.Code != 0 {
-		return "" // a target that will not answer keeps the default PATH
-	}
-	var login string
-	for _, line := range strings.Split(string(res.Stdout), "\n") {
-		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "LOGINPATH="); ok {
-			login = v
+// parseProbe reads one probe's answers.
+//
+// The returned map is every KEY=VALUE line the target printed, so a caller
+// that spliced its own questions in reads its own answers from the same
+// output without this package having to know what they were.
+func parseProbe(out []byte) (*Capabilities, map[string]string, error) {
+	text, echoed, marked := bytes.Cut(out, []byte(rawProbeMark))
+	answers := map[string]string{}
+	for _, line := range strings.Split(string(text), "\n") {
+		if k, v, ok := strings.Cut(strings.TrimSpace(line), "="); ok {
+			answers[k] = v
 		}
 	}
-	if login == "" || !strings.Contains(login, "/") {
-		return ""
+
+	c := &Capabilities{
+		Uname:          answers["UNAME"],
+		StatFlavor:     answers["STAT"],
+		Base64Decode:   answers["B64D"],
+		Base64Encode:   answers["B64E"],
+		HasFind:        answers["FIND"] == "1",
+		FindPrintf:     answers["FINDPF"] == "1",
+		HasXargs:       answers["XARGS"] == "1",
+		Python3:        answers["PY3"] == "1",
+		Ripgrep:        answers["RG"],
+		GrepSkipBinary: answers["GREPI"],
+		CacheDir:       answers["CACHE"],
+		SHA256:         answers["SHA"],
 	}
+	if c.Base64Decode == "" || c.Base64Encode == "" {
+		return c, answers, fmt.Errorf(
+			"target has no base64 and no openssl: reach cannot move file content safely.\n"+
+				"Binary-safe transfer needs one of them; without it, content would have to be\n"+
+				"passed through the shell unencoded, which corrupts any file containing NUL or\n"+
+				"invalid UTF-8. Target reports: %s", c.Uname)
+	}
+
 	// A login shell that adds nothing is not worth overriding anything for.
-	plain, err := t.Run(ctx, reach.ExecRequest{Command: `printf %s "$PATH"`, MaxOutput: 64 << 10})
-	if err == nil && strings.TrimSpace(string(plain.Stdout)) == login {
-		return ""
+	if login := answers["LOGINPATH"]; login != answers["PLAINPATH"] && strings.Contains(login, "/") {
+		c.LoginPath = login
 	}
-	return login
+
+	blob := rawProbeBlob()
+	sum := sha256.Sum256(blob)
+	if fields := strings.Fields(answers["DIGEST"]); len(fields) > 0 {
+		c.RawStdin = strings.TrimPrefix(fields[0], "\\") == hex.EncodeToString(sum[:])
+	}
+	c.RawStdout = marked && bytes.Equal(echoed, blob)
+	return c, answers, nil
 }
 
 // pathEnv renders a PATH override, or nothing when there is none to apply.
