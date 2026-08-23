@@ -468,22 +468,101 @@ func (s *Session) OperationContext(ctx context.Context) (context.Context, contex
 	return context.WithTimeout(ctx, timeout)
 }
 
-// checkWorkspace verifies the session's directory exists on the target.
+// workspaceQuestions returns the shell that settles this session's workspace,
+// for splicing into the capability probe, and the relative path the operator
+// wrote when they wrote one.
 //
-// wrote is the relative path the operator typed, when they typed one, and is
-// empty otherwise. It only matters on the failure path: a relative path that
-// is missing under the login directory but present at the root is almost
-// always someone spelling a target the way reach read them before it followed
-// scp, and saying so is cheaper than letting them guess.
-func (s *Session) checkWorkspace(ctx context.Context, t transport.Transport, wrote string) error {
-	res, err := t.Run(ctx, reach.ExecRequest{
-		Command:   fmt.Sprintf("test -d %s", transport.ShellQuote(s.Target.Workspace)),
-		MaxOutput: 4 << 10,
-	})
-	if err != nil {
-		return err
+// The join happens on the target because two of the three spellings are
+// questions only the target can answer: where a plain login lands, and where
+// somebody's home directory is. The operator's own home directory is no answer
+// to either — on a container it may not exist at all. reach's reading of the
+// path is unchanged; the shell joins what was written, and Go still cleans and
+// records the result.
+//
+// wrote only matters on the failure path: a relative path that is missing under
+// the login directory but present at the root is almost always someone spelling
+// a target the way reach read them before it followed scp. That twin is asked
+// about here rather than after the failure, because a diagnostic that costs a
+// round trip is one this probe has just spent a whole script avoiding.
+func (s *Session) workspaceQuestions() (script string, wrote string, err error) {
+	ws := s.Target.Workspace
+	var b strings.Builder
+	b.WriteString("printf 'LOGINDIR=%s\\n' \"$(pwd)\"\n")
+
+	switch {
+	case ws == "":
+		b.WriteString("__reach_ws=$(pwd)\n")
+	case strings.HasPrefix(ws, "~"):
+		word, rest, _ := strings.Cut(ws, "/")
+		if !tildeWord.MatchString(word) {
+			return "", "", fmt.Errorf("workspace %q: reach expands ~ and ~user, and %q is neither", ws, word)
+		}
+		// The word is unquoted because that is the only way a shell will
+		// expand a tilde, and tildeWord is what makes sending it unquoted
+		// safe. Everything after the first slash is quoted as usual.
+		b.WriteString("__reach_ws=" + word)
+		if rest != "" {
+			b.WriteString("/" + transport.ShellQuote(rest))
+		}
+		b.WriteString("\n")
+	case path.IsAbs(ws):
+		b.WriteString("__reach_ws=" + transport.ShellQuote(path.Clean(ws)) + "\n")
+	default:
+		wrote = ws
+		b.WriteString("__reach_ws=\"$(pwd)\"/" + transport.ShellQuote(path.Clean(ws)) + "\n")
 	}
-	if res.Code == 0 {
+
+	b.WriteString("printf 'WORKSPACE=%s\\n' \"$__reach_ws\"\n")
+	b.WriteString("if [ -d \"$__reach_ws\" ]; then printf 'WSOK=1\\n'; else printf 'WSOK=0\\n'; fi\n")
+	if wrote != "" {
+		rooted := "/" + strings.TrimLeft(wrote, "/")
+		b.WriteString("if [ -d " + transport.ShellQuote(rooted) +
+			" ]; then printf 'ROOTED=1\\n'; else printf 'ROOTED=0\\n'; fi\n")
+	}
+	return b.String(), wrote, nil
+}
+
+// settleWorkspace reads the workspace back out of one probe's answers and
+// writes it into the session.
+//
+// The workspace is settled once, here, and recorded. Asking the target every
+// time would leave two commands in one session disagreeing about where they are
+// working if the home directory ever moved, and the whole point of a session is
+// that they cannot.
+func (s *Session) settleWorkspace(a map[string]string, wrote string) error {
+	// Recorded whenever the target answered, not only when the spelling needed
+	// it: it is what lets a later `reach box:app claude` recognise the session
+	// this one made without asking the host for a directory it has already
+	// answered for.
+	if login := a["LOGINDIR"]; strings.HasPrefix(login, "/") {
+		s.Target.LoginDir = login
+	}
+
+	ws := a["WORKSPACE"]
+	if strings.HasPrefix(s.Target.Workspace, "~") {
+		// A shell that cannot expand a tilde leaves it alone rather than
+		// failing, so the word coming back unchanged is how "no such user"
+		// arrives.
+		word, _, _ := strings.Cut(s.Target.Workspace, "/")
+		if ws == "" || strings.HasPrefix(ws, "~") {
+			return fmt.Errorf("the target did not expand %s; there may be no such user there", word)
+		}
+	}
+	if ws == "" || !strings.HasPrefix(ws, "/") {
+		// Only reachable when the target could not say where a login lands,
+		// since the other spellings are absolute before they are sent.
+		return fmt.Errorf(
+			"the target did not say where a login starts, so reach does not know where to work.\n" +
+				"Name the directory instead, as in host:/srv/app")
+	}
+	s.Target.Workspace = path.Clean(ws)
+
+	// Confirm the workspace is really there. Without this, `reach up` succeeds
+	// against any reachable host and then *every* command fails with a `cd`
+	// error from the target — which reads as reach being broken rather than as
+	// a path being wrong, and does so once per tool call rather than once, in
+	// front of the operator who typed the path.
+	if a["WSOK"] == "1" {
 		return nil
 	}
 	return fmt.Errorf(
@@ -491,28 +570,21 @@ func (s *Session) checkWorkspace(ctx context.Context, t transport.Transport, wro
 			"reach will not create it: making directories on a machine you pointed at is\n"+
 			"not something this tool should do uninvited. Create it there, or point reach\n"+
 			"at a path that exists.%s", s.Target.Workspace, s.Target.DescribeHost(),
-		s.rootedTwin(ctx, t, wrote))
+		s.rootedTwin(a, wrote))
 }
 
-// rootedTwin looks for the directory the operator may have meant, and returns
-// the sentence to add to the failure when it finds one.
+// rootedTwin returns the sentence to add to a missing-workspace failure when
+// the directory the operator may have meant is really there.
 //
 // A path in a target is relative unless it starts with a slash, which is what
 // scp, sftp and curl do with the same spellings. reach used to read the URI
 // form the other way round, so `ssh://box/srv/app` moved from /srv/app to
 // ~/srv/app, and this is the one failure that change can produce.
-func (s *Session) rootedTwin(ctx context.Context, t transport.Transport, wrote string) string {
-	if wrote == "" {
+func (s *Session) rootedTwin(a map[string]string, wrote string) string {
+	if wrote == "" || a["ROOTED"] != "1" {
 		return ""
 	}
 	rooted := "/" + strings.TrimLeft(wrote, "/")
-	res, err := t.Run(ctx, reach.ExecRequest{
-		Command:   fmt.Sprintf("test -d %s", transport.ShellQuote(rooted)),
-		MaxOutput: 4 << 10,
-	})
-	if err != nil || res.Code != 0 {
-		return ""
-	}
 	why := fmt.Sprintf("\n\n"+
 		"%s does exist. A path is relative to where a login lands unless it starts with\n"+
 		"a slash, the way scp and sftp read the same spellings. For the one at the root,\n",
@@ -526,100 +598,11 @@ func (s *Session) rootedTwin(ctx context.Context, t transport.Transport, wrote s
 	return why + fmt.Sprintf("write %s:%s or ssh://%s/%s.", host, rooted, host, rooted)
 }
 
-// loginDir asks the target where a plain login lands.
-//
-// This is what an absent path in a target spec means. It is a question only
-// the target can answer — the operator's own home directory is irrelevant, and
-// on a container it may not exist at all — so reach asks rather than guesses.
-func loginDir(ctx context.Context, t transport.Transport) (string, error) {
-	res, err := t.Run(ctx, reach.ExecRequest{Command: "pwd", MaxOutput: 4 << 10})
-	if err != nil {
-		return "", fmt.Errorf("ask the target where a login starts: %w", err)
-	}
-	dir := strings.TrimSpace(string(res.Stdout))
-	if res.Code != 0 || dir == "" {
-		return "", fmt.Errorf(
-			"the target did not say where a login starts, so reach does not know where to work.\n"+
-				"Name the directory instead, as in host:/srv/app: %s",
-			strings.TrimSpace(string(res.Stderr)))
-	}
-	if !strings.HasPrefix(dir, "/") {
-		return "", fmt.Errorf(
-			"the target reported %q as its starting directory, which is not an absolute path.\n"+
-				"Name the directory instead, as in host:/srv/app", dir)
-	}
-	return dir, nil
-}
-
-// resolveWorkspace turns the directory the operator wrote into an absolute
-// path on the target, and returns the relative spelling they used, if any, for
-// diagnostics that only matter when the directory turns out not to exist.
-//
-// The rules are scp's, not reach's: a path is relative to where a login lands
-// unless it starts with a slash, a leading tilde is the target's to expand,
-// and no path at all means the login directory itself. Resolution happens
-// against the target rather than locally because the operator's own home
-// directory is irrelevant here — on a container it may not even exist.
-func (s *Session) resolveWorkspace(ctx context.Context, t transport.Transport) (string, error) {
-	ws := s.Target.Workspace
-	if strings.HasPrefix(ws, "~") {
-		dir, err := tildeDir(ctx, t, ws)
-		if err != nil {
-			return "", err
-		}
-		s.Target.Workspace = dir
-		return "", nil
-	}
-	if path.IsAbs(ws) {
-		s.Target.Workspace = path.Clean(ws)
-		return "", nil
-	}
-
-	login, err := loginDir(ctx, t)
-	if err != nil {
-		return "", err
-	}
-	s.Target.LoginDir = login
-	if ws == "" {
-		s.Target.Workspace = login
-		return "", nil
-	}
-	s.Target.Workspace = path.Clean(login + "/" + ws)
-	return ws, nil
-}
-
 // tildeWord is what may appear before the first slash of a tilde path. It is a
 // whitelist because the word is handed to the target's shell unquoted — that
 // is the only way to get a tilde expanded — and anything outside this set
 // would be the shell's to interpret rather than a username.
 var tildeWord = regexp.MustCompile(`^~[A-Za-z0-9._-]*$`)
-
-// tildeDir asks the target's own shell to expand a leading tilde, which is the
-// only thing that can: ~ is the target's home directory, and ~someone is a
-// question about the target's passwd database.
-func tildeDir(ctx context.Context, t transport.Transport, ws string) (string, error) {
-	word, rest, _ := strings.Cut(ws, "/")
-	if !tildeWord.MatchString(word) {
-		return "", fmt.Errorf("workspace %q: reach expands ~ and ~user, and %q is neither", ws, word)
-	}
-	res, err := t.Run(ctx, reach.ExecRequest{
-		Command:   "printf '%s\\n' " + word,
-		MaxOutput: 4 << 10,
-	})
-	if err != nil {
-		return "", fmt.Errorf("ask the target to expand %s: %w", word, err)
-	}
-	dir := strings.TrimSpace(string(res.Stdout))
-	// A shell that cannot expand a tilde leaves it alone rather than failing,
-	// so the word coming back unchanged is how "no such user" arrives.
-	if res.Code != 0 || dir == "" || strings.HasPrefix(dir, "~") {
-		return "", fmt.Errorf("the target did not expand %s; there may be no such user there", word)
-	}
-	if !path.IsAbs(dir) {
-		return "", fmt.Errorf("the target expanded %s to %q, which is not an absolute path", word, dir)
-	}
-	return path.Clean(dir + "/" + rest), nil
-}
 
 // FileOps builds the file-operation strategy for this session's tier.
 //
@@ -640,31 +623,18 @@ func (s *Session) FileOps(ctx context.Context, t transport.Transport) (fileops.S
 // operator is present and can act on it, into the middle of an agent's turn,
 // where it surfaces as a broken tool.
 func (s *Session) Probe(ctx context.Context) error {
-	t, err := s.InteractiveTransport()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = t.Close() }()
-
-	// The workspace is resolved once, here, and written into the session.
-	// Asking the target every time would leave two commands in one session
-	// disagreeing about where they are working if the home directory ever
-	// moved, and the whole point of a session is that they cannot.
-	wrote, err := s.resolveWorkspace(ctx, t)
-	if err != nil {
-		return err
-	}
-
-	caps, err := fileops.Probe(ctx, t)
-	if err != nil {
-		return err
-	}
-	s.Caps = caps
-
-	// Settle connection multiplexing now, while an operator is present to read
-	// the answer, rather than discovering it inside a tool call. The probe
-	// establishes a master and asks the client to confirm it, so the result
-	// reflects what this client will actually do against this host.
+	// Multiplexing is settled before anything else is asked, because it decides
+	// what asking costs. Every question below is a network round trip, and on a
+	// host 285 ms away a cold connection is ~5 s against ~0.6 s for a channel on
+	// an established master. Settling it last, as this used to, meant the probe
+	// opened a separate authenticated connection for each of its own questions
+	// and then proved that the rest of the session would not have to: 33 s of
+	// connecting to establish that connecting was cheap.
+	//
+	// It is also still the right moment for it. The master is established with
+	// the operator present, so a host that wants a passphrase, a password or a
+	// hardware token asks here rather than inside a tool call that runs in batch
+	// mode and cannot prompt.
 	if s.Target.Kind == KindSSH {
 		ok, why := transport.DetectMultiplexing(ctx, transport.SSHConfig{
 			Host: s.Target.Host,
@@ -675,12 +645,37 @@ func (s *Session) Probe(ctx context.Context) error {
 		s.MultiplexNote = why
 	}
 
-	// Confirm the workspace is really there. Without this, `reach up` succeeds
-	// against any reachable host and then *every* command fails with a `cd`
-	// error from the target — which reads as reach being broken rather than as
-	// a path being wrong, and does so once per tool call rather than once, in
-	// front of the operator who typed the path.
-	if err := s.checkWorkspace(ctx, t, wrote); err != nil {
+	t, err := s.InteractiveTransport()
+	if err != nil {
+		return err
+	}
+	// A multiplexed transport is deliberately not closed. Close tears down the
+	// master, and that master holds the authentication just performed in front
+	// of the operator; throwing it away would hand the first tool call a
+	// reconnect it cannot complete. `reach down` is what ends a connection.
+	// Without multiplexing there is a connection per command and nothing to
+	// keep, so it is closed as before.
+	if !s.Multiplex {
+		defer func() { _ = t.Close() }()
+	}
+
+	// One round trip asks the target everything: what its userland provides,
+	// what PATH the operator really has, whether binary content survives in
+	// each direction, where a login lands, and whether the workspace is there.
+	// They used to be four commands, and four commands are four channel
+	// handshakes — which multiplexing does not remove, and which cost more
+	// between them than any single answer is worth.
+	questions, wrote, err := s.workspaceQuestions()
+	if err != nil {
+		return err
+	}
+	caps, answers, err := fileops.ProbeWith(ctx, t, questions)
+	if err != nil {
+		return err
+	}
+	s.Caps = caps
+
+	if err := s.settleWorkspace(answers, wrote); err != nil {
 		return err
 	}
 

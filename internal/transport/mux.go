@@ -75,6 +75,15 @@ func DetectMultiplexing(ctx context.Context, cfg SSHConfig) (bool, string) {
 		}
 	}()
 
+	// A master that is already up has answered the question by existing, and
+	// asking it is a request on a local socket rather than a connection. This
+	// is the ordinary case for a second session on a host, and for `reach
+	// doctor` run against a session that is working.
+	if probe.Alive(ctx) {
+		keep = true
+		return true, ""
+	}
+
 	if _, err := probe.Run(ctx, reach.ExecRequest{Command: "true"}); err != nil {
 		return false, "the ssh client rejected the multiplexing options: " + err.Error()
 	}

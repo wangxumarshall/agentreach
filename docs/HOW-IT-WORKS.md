@@ -90,7 +90,10 @@ The one long-lived process involved is `ssh` itself: OpenSSH's `ControlMaster`
 keeps the authenticated connection open so later tool calls reuse it instead of
 reconnecting — measured at 4–5× faster per command on real links. `reach down`
 ends it. (Win32-OpenSSH has no `ControlMaster`, so reach probes for multiplexing
-rather than assuming it; see [WINDOWS.md](WINDOWS.md).)
+rather than assuming it; see [WINDOWS.md](WINDOWS.md).) That probe happens
+first, before a session asks the target anything else, because it decides what
+asking costs — everything else arrives in one shell program on the connection
+it opened.
 
 ### No harness is forked
 
