@@ -194,10 +194,15 @@ backwards in either direction is bad: a transport failure reported as a command
 failure sends the agent chasing a phantom bug, and a command failure reported as
 a transport failure makes reach retry something that must not be retried.
 
-**One process per tool call, one channel per command.** That is why there is no
-daemon to write: `ControlMaster` already supplies the only thing a daemon would
-have bought. (Under Codex it is one process per *session* instead — the
-exec-server is spawned once and speaks JSON-RPC on stdio for the whole run.)
+**One process per tool call, one channel per command.** There is still no
+daemon to write, though not quite for the reason it looks like: `ControlMaster`
+supplies connection reuse but not *channel* reuse, and a resident process
+holding one channel open would save ~0.3 s per call on a distant host. Measured
+across real sessions that is about 1% of wall clock, because the model spends
+~17 s thinking between calls — the arithmetic is in
+[ARCHITECTURE.md](ARCHITECTURE.md#there-is-no-daemon). (Under Codex it is one
+process per *session* instead — the exec-server is spawned once and speaks
+JSON-RPC on stdio for the whole run.)
 
 ## Files, without a filesystem
 

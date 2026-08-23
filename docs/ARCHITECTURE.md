@@ -66,13 +66,61 @@ Session state — which target, which directory, which tier, what the target's
 userland supports — lives in a file under `~/.reach`. Every reach invocation is
 a short-lived process that reads it.
 
-A daemon would buy exactly one thing: connection reuse. SSH's `ControlMaster`
-already provides that — measured against real hosts at 4–5× faster per command
-than reconnecting: 171 ms against 772 ms on one, 557 ms against 2.85 s on
-another. Paying for it a second time would mean a lifecycle, a socket, crash
-recovery, version skew between a running daemon and an upgraded binary, and
-orphaned processes holding connections to someone else's server — in exchange
-for nothing.
+A daemon would buy connection reuse. SSH's `ControlMaster` already provides
+that — measured against real hosts at 4–5× faster per command than
+reconnecting: 171 ms against 772 ms on one, 557 ms against 2.85 s on another.
+Paying for it a second time would mean a lifecycle, a socket, crash recovery,
+version skew between a running daemon and an upgraded binary, and orphaned
+processes holding connections to someone else's server.
+
+It would buy one thing more, and this document used to say it would not.
+`ControlMaster` removes the cost of opening a *connection*; it does not remove
+the cost of opening a *channel*, and reach opens one channel per command.
+Measured against a host 200 ms away: **0.51 s** for a command on a new channel
+of an established master, **0.20 s** for one on a channel already running a
+shell. A resident process holding that channel open would save the difference
+on every tool call, and nothing else reach can do will.
+
+### Why that difference is still not worth a daemon
+
+Because of what it is a difference *of*. Measured across five real agent
+sessions against that same host — 830 commands, 7.1 hours of wall clock:
+
+| | |
+|---|---|
+| median gap between one command and the next | 16.8 s |
+| gaps shorter than 1 s | 2% |
+| time spent inside commands at all | 21.3% of wall clock |
+| **saving 0.31 s per command** | **1.0% of wall clock** |
+| removing transport cost entirely | 1.7% of wall clock |
+
+The fourth row is the change. The fifth is the ceiling on every version of it,
+including a perfect one with no daemon and no risk. An agent spends about
+seventeen seconds thinking between tool calls, so a third of a second in front
+of each one is already paid for by something else.
+
+Three shapes were costed before the measurement settled it, and are recorded so
+the next person does not re-derive them: teaching the long-lived exec-server to
+multiplex commands over the handler channel it already holds (helps Codex only,
+and needs a real streaming-and-signalling protocol where today there is one
+request in flight); a resident holder with a socket under `~/.reach` (helps
+every seam, and is the daemon this section argues against); and having `reach
+<target> claude` stay as the harness's parent instead of `execve`-ing into it,
+passing a socket down through the environment (free lifecycle, exact teardown,
+but it makes the fallback path in `launch.go` the normal path for a program
+that owns the terminal — see the comment there on signals and job control).
+
+The rule underneath is worth stating once rather than rediscovering per
+decision: **optimise the latency someone waits on, not the latency a model turn
+already hides.** Binding a session used to be thirty seconds of an operator
+watching `probing build-box ...` with nothing else happening, which is why it
+was worth collapsing from eight round trips to one. A tool call is half a
+second inside a seventeen-second gap.
+
+Two things would change the answer. An agent an order of magnitude faster
+between turns would move the ratio outright; so would `reach exec` becoming
+something people drive from shell scripts, with no model in the loop, where
+that 0.31 s is most of every call.
 
 One consequence is worth stating early, because it shapes the tier design more
 than anything else: **reach runs one process per tool call.**
@@ -138,9 +186,12 @@ variable matched case-insensitively.
 The fifth difference cannot be abstracted away. Win32-OpenSSH does not implement
 `ControlMaster`, so a Windows operator pays a full connection setup per command
 rather than ~7 ms on a shared one. That is not a portability detail: the
-argument for [having no daemon](#there-is-no-daemon) is precisely that
-ControlMaster already provides connection reuse, and on Windows that premise is
-false. reach therefore *probes* for multiplexing rather than assuming it, records
+argument for [having no daemon](#there-is-no-daemon) rests on ControlMaster
+already providing connection reuse, and on Windows that premise is false. The
+gap it leaves is also an order of magnitude larger than the channel-reuse gap
+that section weighs and dismisses — seconds per command against a third of a
+second — so a Windows operator on a distant host is the one case where the
+arithmetic there could come out the other way. reach therefore *probes* for multiplexing rather than assuming it, records
 the answer, and reports it — see [WINDOWS.md](WINDOWS.md).
 
 That probe runs before any other question a session asks, because its answer
