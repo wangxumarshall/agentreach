@@ -109,7 +109,7 @@ gets a numbered variant rather than being overwritten, and `reach up` now says
 so out loud when it repoints a name.
 
 A second command against a target reuses that target's session instead of
-probing again — a probe costs a round trip and an authentication, and asking a
+probing again — a probe costs an authentication and a round trip, and asking a
 host questions it has already answered would be work with no answer attached.
 What is not skipped is the connection: reuse re-authenticates while the operator
 is still present, because every connection after that runs in batch mode and
@@ -142,6 +142,15 @@ argument for [having no daemon](#there-is-no-daemon) is precisely that
 ControlMaster already provides connection reuse, and on Windows that premise is
 false. reach therefore *probes* for multiplexing rather than assuming it, records
 the answer, and reports it — see [WINDOWS.md](WINDOWS.md).
+
+That probe runs before any other question a session asks, because its answer
+decides what asking costs. Everything else the target is asked — what its
+userland provides, what `PATH` a login shell would give, whether the link is
+8-bit clean in each direction, where a login lands, whether the workspace is
+there — travels in one shell program on the connection the probe established.
+Binding a session is therefore one authentication and one round trip, whatever
+the latency: measured against a host 200 ms away, 2.6 s, against 12.4 s when
+each question opened a connection of its own.
 
 ## reach uses the system ssh, not a Go SSH library
 
