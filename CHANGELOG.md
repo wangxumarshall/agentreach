@@ -9,6 +9,62 @@ details in closed harness binaries. Entries therefore name the harness versions
 a change was verified against: "works with Claude Code" is not a claim this
 project makes without a version attached.
 
+## [0.4.0] - 2026-08-23
+
+**Binding a session to a target is about five times faster, and no longer
+multiplies the distance to it by eight.** The probe used to open a connection
+for each of its own questions and settle, last, whether connections could be
+reused at all. It now settles that first and asks everything else in a single
+shell program on the one connection.
+
+A minor rather than a patch because the session document changes: `login_dir`
+is now recorded for every session rather than only the relatively-spelled ones.
+The schema version does not move for it — a field that is correct when absent
+is what the zero value is for — so a session written by this build loads
+unchanged in 0.3.0 and the other way round.
+
+Nothing at a harness seam changed. This release is below the adapter layer, and
+no adapter, seam or launch guard is touched by it.
+
+### Changed
+
+- **Probing a target is one round trip on one connection.** Measured against a
+  host 200 ms away, median of three cold runs: 12.4 s before, 2.6 s after. When
+  a connection to that host is already open — a second session, a re-probe,
+  `reach doctor` — 11.9 s before, 0.73 s after. The probe asks the same
+  questions and records the same answers; the capability document it writes is
+  unchanged.
+
+  Two things were wrong, and they compounded. Multiplexing was the *last* thing
+  the probe settled, so every question before it — the login shell's PATH, the
+  userland inventory, both raw-I/O measurements, the workspace check — opened
+  its own connection and paid its own TCP handshake, key exchange and
+  authentication: seven cold connections at 3-7 s each to establish that the
+  rest of the session would reuse one. And each of those was a separate
+  command, which is a separate channel even once a connection is shared.
+
+  Multiplexing is now settled first. The moment is still the right one, and for
+  the same reason it always was: the operator is present, so a host that wants
+  a passphrase or a hardware token asks here and not inside a tool call that
+  runs in batch mode. A master that is already up now answers the question by
+  existing — asking it is a request on a local socket, not a connection.
+
+  Everything else is one shell program. The login PATH is settled at the top
+  and applied to the rest of it, so what reach finds is what reach can later
+  run; the plain PATH comes back beside it because only their difference is
+  ever used. The two raw-I/O measurements travel in the same command,
+  separated by a marker neither half can contain, so a transport that garbles
+  one still gives an honest answer about the other. And the workspace — where
+  a login lands, a `~user` only the target's passwd database can expand, the
+  directory check, and the "did you mean the one at the root?" twin that used
+  to cost a round trip on the failure path — is spliced into the same program
+  by `fileops.ProbeWith`. A channel handshake costs ~0.3 s on a link like that
+  and multiplexing does not remove it, so four commands cost more between them
+  than any single answer is worth.
+
+  The login directory is now recorded for every session rather than only for
+  the ones spelled relatively, since the target reports it either way.
+
 ## [0.3.0] - 2026-08-23
 
 **A path in a target now means what scp means by it.** `build-box:app` is
@@ -63,43 +119,6 @@ adapter, seam or launch guard is touched by it.
   `reach status` and every message that names a target now print scp's
   spelling — `build-box:/srv/app` — falling back to the URI form when a port
   has to be carried, since scp's has nowhere to put one.
-
-- **Probing a target is one round trip on one connection.** Measured against a
-  host 200 ms away, median of three cold runs: 12.4 s before, 2.6 s after. When
-  a connection to that host is already open — a second session, a re-probe,
-  `reach doctor` — 11.9 s before, 0.73 s after. The probe asks the same
-  questions and records the same answers; the capability document it writes is
-  unchanged.
-
-  Two things were wrong, and they compounded. Multiplexing was the *last* thing
-  the probe settled, so every question before it — the login shell's PATH, the
-  userland inventory, both raw-I/O measurements, the workspace check — opened
-  its own connection and paid its own TCP handshake, key exchange and
-  authentication: seven cold connections at 3-7 s each to establish that the
-  rest of the session would reuse one. And each of those was a separate
-  command, which is a separate channel even once a connection is shared.
-
-  Multiplexing is now settled first. The moment is still the right one, and for
-  the same reason it always was: the operator is present, so a host that wants
-  a passphrase or a hardware token asks here and not inside a tool call that
-  runs in batch mode. A master that is already up now answers the question by
-  existing — asking it is a request on a local socket, not a connection.
-
-  Everything else is one shell program. The login PATH is settled at the top
-  and applied to the rest of it, so what reach finds is what reach can later
-  run; the plain PATH comes back beside it because only their difference is
-  ever used. The two raw-I/O measurements travel in the same command,
-  separated by a marker neither half can contain, so a transport that garbles
-  one still gives an honest answer about the other. And the workspace — where
-  a login lands, a `~user` only the target's passwd database can expand, the
-  directory check, and the "did you mean the one at the root?" twin that used
-  to cost a round trip on the failure path — is spliced into the same program
-  by `fileops.ProbeWith`. A channel handshake costs ~0.3 s on a link like that
-  and multiplexing does not remove it, so four commands cost more between them
-  than any single answer is worth.
-
-  The login directory is now recorded for every session rather than only for
-  the ones spelled relatively, since the target reports it either way.
 
 ### Fixed
 
