@@ -9,7 +9,29 @@ details in closed harness binaries. Entries therefore name the harness versions
 a change was verified against: "works with Claude Code" is not a claim this
 project makes without a version attached.
 
-## [Unreleased]
+## [0.3.0] - 2026-08-23
+
+**A path in a target now means what scp means by it.** `build-box:app` is
+`~/app`, `build-box:/srv/app` is `/srv/app`, and the URI spelling follows the
+same rule, which is why the absolute one there is `ssh://build-box//srv/app`.
+Container targets follow `docker cp` instead and are unchanged. This is
+breaking for `ssh://host/path`, which reach used to read as absolute; a target
+typed the old way fails at the directory check rather than working somewhere
+else, and says where the directory it used to mean actually is.
+
+A minor rather than a patch, and pre-1.0, so the break moves the minor. Nothing
+at a harness seam changed: this release is below the adapter layer, and no
+adapter, seam or launch guard is touched by it.
+
+### Added
+
+- **`~` and `~user` in a target.** `reach build-box:~deploy/app claude` asks
+  the target's own shell where that is, since the operator's local home
+  directory is not an answer to a question about someone else's machine.
+
+- **The login directory is recorded in the session.** It is what lets a second
+  `reach build-box:app claude` recognise the session the first one made without
+  asking the host for a directory it has already answered for.
 
 ### Changed
 
@@ -41,16 +63,6 @@ project makes without a version attached.
   `reach status` and every message that names a target now print scp's
   spelling — `build-box:/srv/app` — falling back to the URI form when a port
   has to be carried, since scp's has nowhere to put one.
-
-### Added
-
-- **`~` and `~user` in a target.** `reach build-box:~deploy/app claude` asks
-  the target's own shell where that is, since the operator's local home
-  directory is not an answer to a question about someone else's machine.
-
-- **The login directory is recorded in the session.** It is what lets a second
-  `reach build-box:app claude` recognise the session the first one made without
-  asking the host for a directory it has already answered for.
 
 ### Fixed
 
