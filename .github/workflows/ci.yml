@@ -245,7 +245,7 @@ jobs:
       # --snapshot), so a broken Dockerfile fails on the push that broke it
       # rather than on the tag. arm64 is emulated; the image only COPYs an
       # already-cross-compiled binary, so the emulation costs almost nothing.
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@v4
       - uses: docker/setup-buildx-action@v3
       - uses: goreleaser/goreleaser-action@v7
         with:
