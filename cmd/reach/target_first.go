@@ -40,7 +40,7 @@ func runTargetFirst(ctx context.Context, args []string) int {
 		// leads with that reading and offers the other.
 		fmt.Fprintf(os.Stderr, "reach: unknown command %q, and not a target either:\n  %v\n\n", spec, err)
 		fmt.Fprintf(os.Stderr, "  If you meant a command, `reach help` lists them.\n"+
-			"  If you meant a machine, spell it out:  reach ssh://%s/srv/app claude\n", spec)
+			"  If you meant a machine, spell it out:  reach %s:/srv/app claude\n", spec)
 		return 2
 	}
 
@@ -138,7 +138,7 @@ func resolveTargetSpec(spec string) (*session.Target, error) {
 		return session.ParseTarget(spec)
 	}
 	if !looksLikeHost(spec) {
-		return nil, fmt.Errorf("it is not scheme://..., [user@]host:/path, or a hostname")
+		return nil, fmt.Errorf("it is not scheme://..., [user@]host:path, or a hostname")
 	}
 	if found, why := findHost(spec); !found {
 		return nil, errors.New(why)
@@ -150,8 +150,8 @@ func resolveTargetSpec(spec string) (*session.Target, error) {
 
 // sessionOptions are the settings that describe a session rather than a
 // command. `reach up` and the flags allowed between a target and its command
-// take the same set, so that `reach up ssh://box/srv --mode mirror` and
-// `reach ssh://box/srv --mode mirror claude` mean the same thing.
+// take the same set, so that `reach up box:/srv --mode mirror` and
+// `reach box:/srv --mode mirror claude` mean the same thing.
 type sessionOptions struct {
 	name    string
 	mode    string
@@ -344,9 +344,14 @@ func newSession(name string, target *session.Target, o *sessionOptions) (*sessio
 
 // bringUp probes the target and records the session.
 func bringUp(ctx context.Context, s *session.Session) error {
-	fmt.Fprintf(os.Stderr, "probing %s ...\n", s.Target.Describe())
+	// The host, not the workspace: an unprobed session may not know its
+	// directory yet, and "probing build-box:" reads as a truncated sentence.
+	fmt.Fprintf(os.Stderr, "probing %s ...\n", s.Target.DescribeHost())
 	if err := s.Probe(ctx); err != nil {
-		return fmt.Errorf("cannot use %s: %w", s.Target.Describe(), err)
+		// The host, not the target: a probe that got far enough to reject a
+		// directory has already named it, and naming it twice in one sentence
+		// buries the part the operator has to act on.
+		return fmt.Errorf("cannot use %s: %w", s.Target.DescribeHost(), err)
 	}
 	if err := s.Save(); err != nil {
 		return err
@@ -372,7 +377,18 @@ func sameTarget(have, want *session.Target) bool {
 		have.Port != want.Port || have.Container != want.Container {
 		return false
 	}
-	return want.Workspace == "" || have.Workspace == want.Workspace
+	if want.Workspace == "" || have.Workspace == want.Workspace {
+		return true
+	}
+	// `reach box:app claude` names a directory only the target can point to,
+	// and the session it made the first time recorded the answer. Resolving
+	// against that record is what keeps the second run from probing the host
+	// again and opening box-app-2 beside the session it should have reused.
+	// When there is no record — a session written before reach kept one, or a
+	// tilde nothing local can expand — the session is re-probed rather than
+	// assumed to be the wrong one.
+	resolved, ok := have.ResolveLike(want.Workspace)
+	return ok && resolved == have.Workspace
 }
 
 // optionsAgree reports whether an existing session was built the way this

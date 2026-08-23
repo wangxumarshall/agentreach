@@ -9,6 +9,55 @@ details in closed harness binaries. Entries therefore name the harness versions
 a change was verified against: "works with Claude Code" is not a claim this
 project makes without a version attached.
 
+## [Unreleased]
+
+### Changed
+
+- **BREAKING: a path in a target now means what scp means by it.** A path is
+  relative to the directory a login lands in unless it starts with a slash, in
+  both spellings: `build-box:app` and `ssh://build-box/app` are `~/app`, while
+  `build-box:/srv/app` and `ssh://build-box//srv/app` are `/srv/app`. A leading
+  `~` or `~user` is expanded by the target, which is the only thing that can
+  answer for it. Container targets follow `docker cp` instead — paths are
+  relative to the container's root and the leading slash is optional — so
+  `docker://c/srv/app` means what it always did.
+
+  What changed is `ssh://host/srv/app`, which used to mean `/srv/app` and now
+  means `~/srv/app`. reach had taken git's reading of an `ssh://` URL while
+  shelling out to OpenSSH, which reads the same string the other way: its parser
+  treats the slash that ends the host as a delimiter (`*cp = s + 1` in
+  hpdelim2, misc.c), so `scp` and `sftp` receive a path with no leading slash
+  and a second slash is what makes one absolute. curl reads `sftp://` URLs the
+  same way. Two conventions for one spelling is a coin flip an operator has to
+  win every time they type a target, and the one reach follows should be the
+  one belonging to the binary it invokes.
+
+  Sessions already on disk are unaffected: they recorded the directory they
+  resolved to, not the spelling that produced it. A target retyped the old way
+  fails at the directory check rather than silently working somewhere else, and
+  when the directory it used to mean is really there, the failure says so and
+  gives both spellings for it.
+
+  `reach status` and every message that names a target now print scp's
+  spelling — `build-box:/srv/app` — falling back to the URI form when a port
+  has to be carried, since scp's has nowhere to put one.
+
+### Added
+
+- **`~` and `~user` in a target.** `reach build-box:~deploy/app claude` asks
+  the target's own shell where that is, since the operator's local home
+  directory is not an answer to a question about someone else's machine.
+
+- **The login directory is recorded in the session.** It is what lets a second
+  `reach build-box:app claude` recognise the session the first one made without
+  asking the host for a directory it has already answered for.
+
+### Fixed
+
+- **A Windows path is no longer read as a host.** `reach C:\src\app claude`
+  was parsed as a host named `C`; it had been caught by the rule that a
+  workspace must be absolute, which relative paths now retire.
+
 ## [0.2.0] - 2026-08-22
 
 **A target now names a session.** `reach build-box claude` binds a session to

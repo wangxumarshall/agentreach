@@ -98,7 +98,7 @@ func cmdUp(ctx context.Context, args []string) error {
 		return err
 	}
 	if len(pos) < 1 {
-		return fmt.Errorf("usage: reach up <target> [--name N] [--mode exec|mirror]\n\nExamples:\n  reach up ssh://build-box/srv/app\n  reach build-box claude   # bind a session and start an agent in one step")
+		return fmt.Errorf("usage: reach up <target> [--name N] [--mode exec|mirror]\n\nExamples:\n  reach up build-box:/srv/app\n  reach build-box claude   # bind a session and start an agent in one step")
 	}
 	o.markSet(fs)
 
@@ -316,7 +316,7 @@ func cmdStatus(_ context.Context, args []string) error {
 		return err
 	}
 	if len(sessions) == 0 && len(broken) == 0 {
-		fmt.Println("no reach sessions.\n\nStart one with:\n  reach up ssh://host/srv/app")
+		fmt.Println("no reach sessions.\n\nStart one with:\n  reach up host:/srv/app")
 		return nil
 	}
 	if len(sessions) > 0 {

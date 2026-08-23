@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -264,9 +265,9 @@ type noSuchSessionError struct{ name string }
 
 func (e *noSuchSessionError) Error() string {
 	return fmt.Sprintf("no reach session named %q. Start one with:\n"+
-		"  reach up ssh://host/path --name %s\n"+
+		"  reach up host:/srv/app --name %s\n"+
 		"or point the command straight at a target, which names the session for you:\n"+
-		"  reach ssh://host/path claude",
+		"  reach host:/srv/app claude",
 		e.name, e.name)
 }
 
@@ -468,7 +469,13 @@ func (s *Session) OperationContext(ctx context.Context) (context.Context, contex
 }
 
 // checkWorkspace verifies the session's directory exists on the target.
-func (s *Session) checkWorkspace(ctx context.Context, t transport.Transport) error {
+//
+// wrote is the relative path the operator typed, when they typed one, and is
+// empty otherwise. It only matters on the failure path: a relative path that
+// is missing under the login directory but present at the root is almost
+// always someone spelling a target the way reach read them before it followed
+// scp, and saying so is cheaper than letting them guess.
+func (s *Session) checkWorkspace(ctx context.Context, t transport.Transport, wrote string) error {
 	res, err := t.Run(ctx, reach.ExecRequest{
 		Command:   fmt.Sprintf("test -d %s", transport.ShellQuote(s.Target.Workspace)),
 		MaxOutput: 4 << 10,
@@ -483,7 +490,40 @@ func (s *Session) checkWorkspace(ctx context.Context, t transport.Transport) err
 		"%s is not a directory on %s.\n"+
 			"reach will not create it: making directories on a machine you pointed at is\n"+
 			"not something this tool should do uninvited. Create it there, or point reach\n"+
-			"at a path that exists.", s.Target.Workspace, s.Target.Describe())
+			"at a path that exists.%s", s.Target.Workspace, s.Target.DescribeHost(),
+		s.rootedTwin(ctx, t, wrote))
+}
+
+// rootedTwin looks for the directory the operator may have meant, and returns
+// the sentence to add to the failure when it finds one.
+//
+// A path in a target is relative unless it starts with a slash, which is what
+// scp, sftp and curl do with the same spellings. reach used to read the URI
+// form the other way round, so `ssh://box/srv/app` moved from /srv/app to
+// ~/srv/app, and this is the one failure that change can produce.
+func (s *Session) rootedTwin(ctx context.Context, t transport.Transport, wrote string) string {
+	if wrote == "" {
+		return ""
+	}
+	rooted := "/" + strings.TrimLeft(wrote, "/")
+	res, err := t.Run(ctx, reach.ExecRequest{
+		Command:   fmt.Sprintf("test -d %s", transport.ShellQuote(rooted)),
+		MaxOutput: 4 << 10,
+	})
+	if err != nil || res.Code != 0 {
+		return ""
+	}
+	why := fmt.Sprintf("\n\n"+
+		"%s does exist. A path is relative to where a login lands unless it starts with\n"+
+		"a slash, the way scp and sftp read the same spellings. For the one at the root,\n",
+		rooted)
+	host := s.Target.DescribeHost()
+	// scp's spelling has nowhere to put a port, so a target that carries one
+	// can only be offered the URI form.
+	if s.Target.Port != 0 {
+		return why + fmt.Sprintf("write ssh://%s/%s.", host, rooted)
+	}
+	return why + fmt.Sprintf("write %s:%s or ssh://%s/%s.", host, rooted, host, rooted)
 }
 
 // loginDir asks the target where a plain login lands.
@@ -500,15 +540,85 @@ func loginDir(ctx context.Context, t transport.Transport) (string, error) {
 	if res.Code != 0 || dir == "" {
 		return "", fmt.Errorf(
 			"the target did not say where a login starts, so reach does not know where to work.\n"+
-				"Name the directory instead, as in ssh://host/srv/app: %s",
+				"Name the directory instead, as in host:/srv/app: %s",
 			strings.TrimSpace(string(res.Stderr)))
 	}
 	if !strings.HasPrefix(dir, "/") {
 		return "", fmt.Errorf(
 			"the target reported %q as its starting directory, which is not an absolute path.\n"+
-				"Name the directory instead, as in ssh://host/srv/app", dir)
+				"Name the directory instead, as in host:/srv/app", dir)
 	}
 	return dir, nil
+}
+
+// resolveWorkspace turns the directory the operator wrote into an absolute
+// path on the target, and returns the relative spelling they used, if any, for
+// diagnostics that only matter when the directory turns out not to exist.
+//
+// The rules are scp's, not reach's: a path is relative to where a login lands
+// unless it starts with a slash, a leading tilde is the target's to expand,
+// and no path at all means the login directory itself. Resolution happens
+// against the target rather than locally because the operator's own home
+// directory is irrelevant here — on a container it may not even exist.
+func (s *Session) resolveWorkspace(ctx context.Context, t transport.Transport) (string, error) {
+	ws := s.Target.Workspace
+	if strings.HasPrefix(ws, "~") {
+		dir, err := tildeDir(ctx, t, ws)
+		if err != nil {
+			return "", err
+		}
+		s.Target.Workspace = dir
+		return "", nil
+	}
+	if path.IsAbs(ws) {
+		s.Target.Workspace = path.Clean(ws)
+		return "", nil
+	}
+
+	login, err := loginDir(ctx, t)
+	if err != nil {
+		return "", err
+	}
+	s.Target.LoginDir = login
+	if ws == "" {
+		s.Target.Workspace = login
+		return "", nil
+	}
+	s.Target.Workspace = path.Clean(login + "/" + ws)
+	return ws, nil
+}
+
+// tildeWord is what may appear before the first slash of a tilde path. It is a
+// whitelist because the word is handed to the target's shell unquoted — that
+// is the only way to get a tilde expanded — and anything outside this set
+// would be the shell's to interpret rather than a username.
+var tildeWord = regexp.MustCompile(`^~[A-Za-z0-9._-]*$`)
+
+// tildeDir asks the target's own shell to expand a leading tilde, which is the
+// only thing that can: ~ is the target's home directory, and ~someone is a
+// question about the target's passwd database.
+func tildeDir(ctx context.Context, t transport.Transport, ws string) (string, error) {
+	word, rest, _ := strings.Cut(ws, "/")
+	if !tildeWord.MatchString(word) {
+		return "", fmt.Errorf("workspace %q: reach expands ~ and ~user, and %q is neither", ws, word)
+	}
+	res, err := t.Run(ctx, reach.ExecRequest{
+		Command:   "printf '%s\\n' " + word,
+		MaxOutput: 4 << 10,
+	})
+	if err != nil {
+		return "", fmt.Errorf("ask the target to expand %s: %w", word, err)
+	}
+	dir := strings.TrimSpace(string(res.Stdout))
+	// A shell that cannot expand a tilde leaves it alone rather than failing,
+	// so the word coming back unchanged is how "no such user" arrives.
+	if res.Code != 0 || dir == "" || strings.HasPrefix(dir, "~") {
+		return "", fmt.Errorf("the target did not expand %s; there may be no such user there", word)
+	}
+	if !path.IsAbs(dir) {
+		return "", fmt.Errorf("the target expanded %s to %q, which is not an absolute path", word, dir)
+	}
+	return path.Clean(dir + "/" + rest), nil
 }
 
 // FileOps builds the file-operation strategy for this session's tier.
@@ -536,18 +646,13 @@ func (s *Session) Probe(ctx context.Context) error {
 	}
 	defer func() { _ = t.Close() }()
 
-	// A target given without a path — `ssh://build-box`, `build-box:` — means
-	// the directory a login there lands in. It is resolved once, here, and
-	// written into the session: asking the target every time would leave two
-	// commands in one session disagreeing about where they are working if the
-	// home directory ever moved, and the whole point of a session is that they
-	// cannot.
-	if s.Target.Workspace == "" {
-		ws, err := loginDir(ctx, t)
-		if err != nil {
-			return err
-		}
-		s.Target.Workspace = ws
+	// The workspace is resolved once, here, and written into the session.
+	// Asking the target every time would leave two commands in one session
+	// disagreeing about where they are working if the home directory ever
+	// moved, and the whole point of a session is that they cannot.
+	wrote, err := s.resolveWorkspace(ctx, t)
+	if err != nil {
+		return err
 	}
 
 	caps, err := fileops.Probe(ctx, t)
@@ -575,7 +680,7 @@ func (s *Session) Probe(ctx context.Context) error {
 	// error from the target — which reads as reach being broken rather than as
 	// a path being wrong, and does so once per tool call rather than once, in
 	// front of the operator who typed the path.
-	if err := s.checkWorkspace(ctx, t); err != nil {
+	if err := s.checkWorkspace(ctx, t, wrote); err != nil {
 		return err
 	}
 

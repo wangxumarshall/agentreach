@@ -19,7 +19,7 @@ func withTempHome(t *testing.T) {
 
 func newTestSession(t *testing.T, name string) *Session {
 	t.Helper()
-	target, err := ParseTarget("ssh://box/srv/app")
+	target, err := ParseTarget("box:/srv/app")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,10 +244,10 @@ func TestSharesConnectionWith(t *testing.T) {
 	}
 
 	// Same host, different directories: one connection, two sessions.
-	build := save("build", "ssh://box/srv/app")
-	docs := save("docs", "ssh://box/srv/docs")
+	build := save("build", "box:/srv/app")
+	docs := save("docs", "box:/srv/docs")
 	// A different destination, and a kind with no connection to share.
-	save("other", "ssh://elsewhere/srv/app")
+	save("other", "elsewhere:/srv/app")
 	save("here", "local:///tmp")
 
 	if got := build.SharesConnectionWith(); len(got) != 1 || got[0] != "docs" {
@@ -256,7 +256,7 @@ func TestSharesConnectionWith(t *testing.T) {
 	if got := docs.SharesConnectionWith(); len(got) != 1 || got[0] != "build" {
 		t.Errorf("docs shares with %v, want [build]", got)
 	}
-	if got := save("alone", "ssh://elsewhere/srv/other").SharesConnectionWith(); len(got) != 1 || got[0] != "other" {
+	if got := save("alone", "elsewhere:/srv/other").SharesConnectionWith(); len(got) != 1 || got[0] != "other" {
 		t.Errorf("alone shares with %v, want [other]", got)
 	}
 
@@ -274,9 +274,9 @@ func TestSharesConnectionWith(t *testing.T) {
 func TestSharesConnectionDistinguishesCredentials(t *testing.T) {
 	withTempHome(t)
 	for _, tc := range []struct{ name, target string }{
-		{"alice", "ssh://alice@box/srv/app"},
-		{"bob", "ssh://bob@box/srv/app"},
-		{"alt-port", "ssh://alice@box:2222/srv/app"},
+		{"alice", "alice@box:/srv/app"},
+		{"bob", "bob@box:/srv/app"},
+		{"alt-port", "ssh://alice@box:2222//srv/app"},
 	} {
 		tgt, err := ParseTarget(tc.target)
 		if err != nil {

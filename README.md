@@ -71,13 +71,13 @@ whole path, in figures.
 
 ```console
 $ reach build-box claude
-probing ssh://build-box ...
-session "build-box" -> ssh://build-box/home/you
+probing build-box ...
+session "build-box" -> build-box:/home/you
   target   Linux x86_64
   fileops  pipe (negotiated; nothing written to the target)
   search   ripgrep (fast, structured)
   connect  multiplexed (one authenticated connection, reused)
-reach: Claude Code -> ssh://build-box/home/you (bash runs on the target)
+reach: Claude Code -> build-box:/home/you (bash runs on the target)
 
 > what's eating disk on this box?
 ```
@@ -129,8 +129,7 @@ to that rather than speaking SSH itself, so `ProxyJump`, `IdentityFile`, `Match`
 blocks, hardware tokens and 2FA all keep working the way you've configured them.
 
 You can sit in front of Linux, macOS or Windows. Targets can be anything POSIX
-you can reach over `ssh://`, `docker://`, `podman://`, or the usual
-`user@host:/path` shorthand.
+you can reach over `user@host:path`, `ssh://`, `docker://` or `podman://`.
 
 ## Quick start
 
@@ -138,7 +137,7 @@ Name a machine, then name an agent:
 
 ```console
 reach build-box claude                        # an ssh_config alias; work where a login lands
-reach ssh://build-box/srv/app claude          # ... or in a directory you name
+reach build-box:src/app claude                # ... or in a directory you name
 reach client-box:/srv/app codex               # somebody else's server
 ```
 
@@ -161,8 +160,8 @@ open at once** — one terminal per box, and no bookkeeping to keep them apart:
 ```console
 $ reach status
 NAME            TARGET                    MODE  FILEOPS  CWD
-build-box-app   ssh://build-box/srv/app   exec  pipe     /srv/app
-client-box-app  ssh://client-box/srv/app  exec  posix    /srv/app
+build-box-app   build-box:/srv/app        exec  pipe     /srv/app
+client-box-app  client-box:/srv/app       exec  posix    /srv/app
 ```
 
 A second command against a target reuses that session instead of probing again,
@@ -180,7 +179,7 @@ For a session meant to outlive one agent — several commands, several days, a
 name you chose — bind it up front and address it by name:
 
 ```console
-reach up ssh://build-box/srv/app --name build
+reach up build-box:/srv/app --name build
 reach claude --session build
 reach down build
 ```
@@ -242,17 +241,43 @@ Targets look like this:
 
 ```
 build-box                      an ssh_config alias, or a name in /etc/hosts
-ssh://user@host/path/to/work
-user@host:/path/to/work        (scp-style shorthand)
+[user@]host:path               scp's spelling
+ssh://[user@]host[:port]/path  OpenSSH's URI spelling, when a port is needed
 docker://container/path
 podman://container/path
-local:///path                  (this machine, mostly for testing)
+local:///abs/path              (this machine, mostly for testing)
 ```
 
-Leave the path off any of them — `build-box`, `ssh://build-box` — and the
-session works wherever a login on that machine lands, which reach asks the
-machine for rather than guessing. A bare word is read as a host only when your
-own ssh configuration or hosts file names it, or when it is an address or a
+**Paths mean what the tool each form is borrowed from means by them.** reach
+invents nothing here, because someone who knows what `scp box:app` copies
+should not have to learn a second convention to use it.
+
+For a host, a path is relative to where a login lands unless it starts with a
+slash, and a leading `~` is the target's to expand:
+
+```
+build-box:app          ~/app on build-box
+build-box:/srv/app     /srv/app
+build-box:~deploy/app  deploy's home, wherever the target says that is
+ssh://build-box/app    ~/app — same rule, same as scp
+ssh://build-box//app   /app
+```
+
+The second slash in the URI form is not a typo. OpenSSH's own parser treats the
+slash that ends the host as a delimiter, so what reaches `scp` and `sftp` as
+the path has no leading slash and a second one is what makes it absolute; curl
+reads `sftp://` URLs the same way. Note that git reads `ssh://` the other way
+round, absolute from the first slash. Where the two disagree, reach follows the
+`ssh` binary it is shelling out to.
+
+For a container, `docker cp`'s rule holds instead: paths are relative to the
+container's root, so the leading slash is optional and `docker://c/srv/app` and
+`docker://c//srv/app` are the same directory.
+
+Leave the path off any of them — `build-box`, `ssh://build-box`, `build-box:` —
+and the session works wherever a login on that machine lands, which reach asks
+the machine for rather than guessing. A bare word is read as a host only when
+your own ssh configuration or hosts file names it, or when it is an address or a
 dotted name; anything else is reported as a mistyped command, which is what it
 almost always is.
 
@@ -330,7 +355,7 @@ rather use Claude Code's native file tools than push every change through a shel
 redirect:
 
 ```console
-reach ssh://build-box/srv/app --mode mirror claude
+reach build-box:/srv/app --mode mirror claude
 ```
 
 Mirror keeps a content digest for each file it hands over, so if the file changed
