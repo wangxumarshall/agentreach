@@ -246,7 +246,7 @@ jobs:
       # rather than on the tag. arm64 is emulated; the image only COPYs an
       # already-cross-compiled binary, so the emulation costs almost nothing.
       - uses: docker/setup-qemu-action@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       - uses: goreleaser/goreleaser-action@v7
         with:
           version: '~> v2'
