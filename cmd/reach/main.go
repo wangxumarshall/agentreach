@@ -39,11 +39,12 @@ HARNESSES
   kimi [args...]    launch Kimi Code wired to the session
   goose [args...]   launch Goose wired to the session
   gemini [args...]  launch Gemini CLI wired to the session
+  agy [args...]     launch Antigravity CLI wired to the session
   crush [args...]   launch Crush wired to the session (server mode)
   grok [args...]    launch Grok Build wired to the session
   opencode install  install tools that shadow opencode's built-ins
   env               print the environment a harness needs
-  harness verify claude|codex|kimi|goose|gemini|grok   probe whether this harness's shell routes through reach
+  harness verify claude|codex|kimi|goose|gemini|antigravity|grok   probe whether this harness's shell routes through reach
 
 TARGETS
   build-box                        an ssh_config alias; work where a login lands
@@ -126,7 +127,7 @@ var knownCommands = map[string]bool{
 	"up": true, "down": true, "status": true, "doctor": true, "log": true,
 	"exec": true, "fs": true, "env": true, "helper": true, "harness": true,
 	"claude": true, "codex": true, "kimi": true, "goose": true,
-	"gemini": true, "crush": true, "grok": true, "opencode": true,
+	"gemini": true, "antigravity": true, "agy": true, "crush": true, "grok": true, "opencode": true,
 	"shell-prefix": true, "hook": true, "exec-server": true,
 	"agent":   true,
 	"version": true, "--version": true, "-v": true,
@@ -171,6 +172,10 @@ func dispatch(ctx context.Context, args []string) int {
 		return cmdGoose(ctx, args[1:])
 	case "gemini":
 		return cmdGemini(ctx, args[1:])
+	case "antigravity":
+		return cmdAntigravity(ctx, args[1:])
+	case "agy":
+		return cmdAgy(ctx, args[1:])
 	case "crush":
 		return cmdCrush(ctx, args[1:])
 	case "grok":

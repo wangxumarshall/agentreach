@@ -146,3 +146,25 @@ func TestNewFlagSetDoesNotExit(t *testing.T) {
 		t.Errorf("error handling is %v, want ContinueOnError", fs.ErrorHandling())
 	}
 }
+
+func TestParseHarnessArgs(t *testing.T) {
+	fs := newFlagSet("agy")
+	name := fs.String("session", "", "")
+	force := fs.Bool("force", false, "")
+
+	args := []string{"--dangerously-skip-permissions", "--session", "my-sess", "-p", "hello", "--force"}
+	harnessArgs, err := parseHarnessArgs(fs, args)
+	if err != nil {
+		t.Fatalf("parseHarnessArgs failed: %v", err)
+	}
+	if *name != "my-sess" {
+		t.Errorf("session = %q, want 'my-sess'", *name)
+	}
+	if !*force {
+		t.Errorf("force = %v, want true", *force)
+	}
+	wantHarness := []string{"--dangerously-skip-permissions", "-p", "hello"}
+	if !slices.Equal(harnessArgs, wantHarness) {
+		t.Errorf("harnessArgs = %v, want %v", harnessArgs, wantHarness)
+	}
+}

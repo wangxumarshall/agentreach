@@ -157,3 +157,30 @@ func TestIsGrokLocalSnapshot(t *testing.T) {
 		t.Fatal("tool envelope must not be classified as a snapshot")
 	}
 }
+
+func TestTranslateCommandForTarget(t *testing.T) {
+	sess := testSession(t, "/srv/app")
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"dir", "ls -la"},
+		{"dir /s /b", "ls -la"},
+		{"dir sub\\dir", "ls -la sub/dir"},
+		{"type file.txt", "cat file.txt"},
+		{"type path\\to\\file.txt", "cat path/to/file.txt"},
+		{"cls", "clear"},
+		{"del old.txt", "rm -f old.txt"},
+		{"Get-ChildItem", "ls -la"},
+		{"Get-ChildItem -Path sub\\dir", "ls -la sub/dir"},
+		{"Get-Content file.txt", "cat file.txt"},
+		{"cd sub\\dir && ls", "cd sub/dir && ls"},
+		{"ls -la", "ls -la"},
+	}
+	for _, tc := range tests {
+		got := translateCommandForTarget(sess, tc.in)
+		if got != tc.want {
+			t.Errorf("translateCommandForTarget(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

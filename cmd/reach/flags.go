@@ -1,6 +1,10 @@
 package main
 
-import "flag"
+import (
+	"flag"
+	"fmt"
+	"strings"
+)
 
 // parseFlags parses a flag set where flags may appear before, after or between
 // positional arguments, and returns the positional arguments.
@@ -44,4 +48,49 @@ func parseFlags(fs *flag.FlagSet, args []string) ([]string, error) {
 // can produce their own message.
 func newFlagSet(name string) *flag.FlagSet {
 	return flag.NewFlagSet(name, flag.ContinueOnError)
+}
+
+// parseHarnessArgs extracts flags recognized by reach's FlagSet while preserving
+// all remaining flags and arguments for the underlying harness (e.g. --dangerously-skip-permissions).
+func parseHarnessArgs(fs *flag.FlagSet, args []string) ([]string, error) {
+	var harnessArgs []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			harnessArgs = append(harnessArgs, args[i+1:]...)
+			break
+		}
+		if !strings.HasPrefix(a, "-") {
+			harnessArgs = append(harnessArgs, a)
+			continue
+		}
+		flagName := strings.TrimLeft(a, "-")
+		if eq := strings.Index(flagName, "="); eq != -1 {
+			flagName = flagName[:eq]
+		}
+		if f := fs.Lookup(flagName); f != nil {
+			if strings.Contains(a, "=") {
+				val := a[strings.Index(a, "=")+1:]
+				if err := f.Value.Set(val); err != nil {
+					return nil, err
+				}
+			} else {
+				if bf, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && bf.IsBoolFlag() {
+					if err := f.Value.Set("true"); err != nil {
+						return nil, err
+					}
+				} else if i+1 < len(args) {
+					i++
+					if err := f.Value.Set(args[i]); err != nil {
+						return nil, err
+					}
+				} else {
+					return nil, fmt.Errorf("flag needs an argument: %s", a)
+				}
+			}
+		} else {
+			harnessArgs = append(harnessArgs, a)
+		}
+	}
+	return harnessArgs, nil
 }

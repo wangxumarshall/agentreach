@@ -187,17 +187,22 @@ func isExecutableFile(path string) bool {
 	return false
 }
 
-// shellCandidateNames are the filenames a real (non-shim) shell may have.
-//
-// On Windows this means a POSIX shell — Git for Windows or MSYS2 — because
-// reach's shim implements the `bash -c` contract and hands anything else
-// straight through to the genuine article.
-func shellCandidateNames() []string { return []string{"bash.exe", "sh.exe"} }
+func shellCandidateNames() []string {
+	return []string{"bash.exe", "sh.exe", "powershell.exe", "pwsh.exe", "cmd.exe"}
+}
 
 // fallbackShellPaths are searched when PATH yields no shell. These are where
-// Git for Windows and MSYS2 install by default.
+// Windows system shells, Git for Windows and MSYS2 install by default.
 func fallbackShellPaths() []string {
 	var out []string
+	systemRoot := os.Getenv("SystemRoot")
+	if systemRoot == "" {
+		systemRoot = `C:\Windows`
+	}
+	out = append(out,
+		filepath.Join(systemRoot, `System32\WindowsPowerShell\v1.0\powershell.exe`),
+		filepath.Join(systemRoot, `System32\cmd.exe`),
+	)
 	for _, root := range []string{
 		os.Getenv("ProgramFiles"),
 		os.Getenv("ProgramFiles(x86)"),

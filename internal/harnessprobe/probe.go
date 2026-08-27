@@ -25,12 +25,14 @@ const DefaultTimeout = 120 * time.Second
 
 // Harnesses the probe knows how to drive.
 const (
-	HarnessClaudeCode = "claude"
-	HarnessCodex      = "codex"
-	HarnessKimi       = "kimi"
-	HarnessGoose      = "goose"
-	HarnessGemini     = "gemini"
-	HarnessGrok       = "grok"
+	HarnessClaudeCode  = "claude"
+	HarnessCodex       = "codex"
+	HarnessKimi        = "kimi"
+	HarnessGoose       = "goose"
+	HarnessGemini      = "gemini"
+	HarnessGrok        = "grok"
+	HarnessAntigravity = "antigravity"
+	HarnessAgy         = "agy"
 )
 
 // Options configures one Verify run.
@@ -91,8 +93,10 @@ var harnessSpecs = map[string]harnessSpec{
 	HarnessCodex:      {dialect: DialectResponses, args: codexArgs, env: codexEnv, prepare: codexPrepare},
 	HarnessKimi:       {dialect: DialectChat, args: kimiArgs, env: kimiEnv, workingDir: "/tmp"},
 	HarnessGoose:      {dialect: DialectChat, args: gooseArgs, env: gooseEnv},
-	HarnessGemini:     {dialect: DialectGemini, args: geminiArgs, env: geminiEnv, prepare: geminiPrepare},
-	HarnessGrok:       {dialect: DialectChat, args: grokArgs, env: grokEnv, prepare: grokPrepare},
+	HarnessGemini:      {dialect: DialectGemini, args: geminiArgs, env: geminiEnv, prepare: geminiPrepare},
+	HarnessGrok:        {dialect: DialectChat, args: grokArgs, env: grokEnv, prepare: grokPrepare},
+	HarnessAntigravity: {dialect: DialectGemini, args: antigravityArgs, env: antigravityEnv, prepare: antigravityPrepare},
+	HarnessAgy:         {dialect: DialectGemini, args: antigravityArgs, env: antigravityEnv, prepare: antigravityPrepare},
 }
 
 // Verify observes where the installed harness actually runs a shell command.
@@ -656,6 +660,51 @@ func geminiPrepare(home, _ string) error {
 	p := filepath.Join(geminiDir, "settings.json")
 	if err := os.WriteFile(p, []byte(settingsJSON), 0o600); err != nil {
 		return fmt.Errorf("write .gemini/settings.json: %w", err)
+	}
+	return nil
+}
+
+func antigravityArgs(_ string) []string {
+	return []string{"--dangerously-skip-permissions", "-p", "Follow the tool-call instructions exactly."}
+}
+
+func antigravityEnv(sessName, shimDir, home, baseURL string) []string {
+	env := baseProbeEnv(sessName, shimDir, func(key string) bool {
+		return key == "HOME" ||
+			strings.HasPrefix(key, "GEMINI_") ||
+			strings.HasPrefix(key, "GOOGLE_") ||
+			strings.HasPrefix(key, "ANTIGRAVITY_") ||
+			strings.HasPrefix(key, "AGY_")
+	})
+	return append(env,
+		"HOME="+home,
+		"GEMINI_API_KEY=dummy",
+		"GOOGLE_GEMINI_BASE_URL="+baseURL,
+		"GEMINI_TELEMETRY_OPT_OUT=1",
+	)
+}
+
+func antigravityPrepare(home, _ string) error {
+	geminiDir := filepath.Join(home, ".gemini")
+	agyDir := filepath.Join(geminiDir, "antigravity-cli")
+	if err := os.MkdirAll(agyDir, 0o700); err != nil {
+		return fmt.Errorf("create .gemini/antigravity-cli dir: %w", err)
+	}
+	const settingsJSON = `{
+  "excludeTools": [
+    "read_file","write_file","replace","replace_file_content","write_to_file","view_file",
+    "glob","grep_search","list_directory","list_dir","read_many_files",
+    "web_fetch","google_web_search","search_web","generate_image",
+    "invoke_agent","invoke_subagent","define_subagent","manage_subagents",
+    "read_mcp_resource","list_mcp_resources"
+  ]
+}
+`
+	if err := os.WriteFile(filepath.Join(geminiDir, "settings.json"), []byte(settingsJSON), 0o600); err != nil {
+		return fmt.Errorf("write .gemini/settings.json: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(agyDir, "settings.json"), []byte(settingsJSON), 0o600); err != nil {
+		return fmt.Errorf("write .gemini/antigravity-cli/settings.json: %w", err)
 	}
 	return nil
 }

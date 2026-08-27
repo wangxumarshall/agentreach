@@ -44,7 +44,7 @@ func cmdClaude(ctx context.Context, args []string) int {
 	name := fs.String("session", "", "session name (default $REACH_SESSION)")
 	allowFileTools := fs.Bool("allow-local-file-tools", false,
 		"do not deny Claude Code's native file tools (unsafe: they act on the LOCAL filesystem)")
-	pos, perr := parseFlags(fs, args)
+	pos, perr := parseHarnessArgs(fs, args)
 	if perr != nil {
 		return 2
 	}

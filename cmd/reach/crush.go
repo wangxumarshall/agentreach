@@ -35,7 +35,7 @@ func cmdCrush(ctx context.Context, args []string) int {
 	name := fs.String("session", "", "session name (default $REACH_SESSION)")
 	force := fs.Bool("force", false,
 		"launch crush locally without a server on the target (tools will act on the LOCAL machine)")
-	pos, err := parseFlags(fs, args)
+	pos, err := parseHarnessArgs(fs, args)
 	if err != nil {
 		return 2
 	}

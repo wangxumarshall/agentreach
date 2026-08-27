@@ -123,6 +123,7 @@ func cmdDoctor(ctx context.Context, args []string) error {
 	reportHarness("kimi", "Kimi Code", kimiSeamNote())
 	reportHarness("goose", "Goose", gooseSeamNote())
 	reportHarness("gemini", "Gemini CLI", geminiSeamNote())
+	reportHarness("agy", "Antigravity", antigravitySeamNote())
 	reportHarness("crush", "Crush", "server mode (crush server --host)")
 	reportHarness("grok", "Grok Build", grokSeamNote())
 	reportHarness("opencode", "opencode", "tool shadowing plugin")

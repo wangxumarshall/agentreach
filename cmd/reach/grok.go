@@ -49,7 +49,7 @@ func cmdGrok(ctx context.Context, args []string) int {
 	name := fs.String("session", "", "session name (default $REACH_SESSION)")
 	force := fs.Bool("force", false,
 		"launch without verifying the shell seam (the agent's commands may run LOCALLY)")
-	pos, err := parseFlags(fs, args)
+	pos, err := parseHarnessArgs(fs, args)
 	if err != nil {
 		return 2
 	}

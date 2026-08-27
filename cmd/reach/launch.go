@@ -25,15 +25,23 @@ import (
 // back to a child process is worse in the ways described above, and enormously
 // better than not starting.
 func replaceProcess(ctx context.Context, path string, argv []string, env []string) int {
-	if err := execve(path, argv, env); err != nil && !execUnsupported(err) {
-		// On a platform that has execve, a failure is worth reporting: it means
-		// something unusual, and the fallback's differences in signal handling
-		// may matter to whoever is debugging it.
-		fmt.Fprintf(os.Stderr, "reach: could not replace this process (%v); running %s as a child instead\n",
-			err, path)
+	return replaceProcessInDir(ctx, path, argv, env, "")
+}
+
+// replaceProcessInDir is replaceProcess with an explicit working directory for the child.
+func replaceProcessInDir(ctx context.Context, path string, argv []string, env []string, dir string) int {
+	if dir == "" {
+		if err := execve(path, argv, env); err != nil && !execUnsupported(err) {
+			// On a platform that has execve, a failure is worth reporting: it means
+			// something unusual, and the fallback's differences in signal handling
+			// may matter to whoever is debugging it.
+			fmt.Fprintf(os.Stderr, "reach: could not replace this process (%v); running %s as a child instead\n",
+				err, path)
+		}
 	}
 
 	cmd := exec.CommandContext(ctx, path, argv[1:]...)
+	cmd.Dir = dir
 	cmd.Env = env
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	// The harness owns the terminal while it runs, so reach must not react to

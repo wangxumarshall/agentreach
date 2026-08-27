@@ -56,6 +56,18 @@ func runTargetFirst(ctx context.Context, args []string) int {
 		return 2
 	}
 
+	var expandedRest []string
+	for _, r := range rest {
+		trimmed := strings.TrimSpace(r)
+		fields := strings.Fields(trimmed)
+		if len(fields) > 1 && (knownCommands[fields[0]] || len(expandedRest) > 0) {
+			expandedRest = append(expandedRest, fields...)
+		} else {
+			expandedRest = append(expandedRest, r)
+		}
+	}
+	rest = expandedRest
+
 	// Checked before the target is probed. Being told about a typo is worth
 	// more than a session the operator did not get to use.
 	if len(rest) > 0 && !knownCommands[rest[0]] {

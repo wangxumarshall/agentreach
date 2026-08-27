@@ -141,24 +141,26 @@ func guardKimiSeam(ctx context.Context, sessName, binPath string) int {
 
 // verifiableHarnesses are the harnesses `reach harness verify` can probe.
 var verifiableHarnesses = map[string]bool{
-	harnessprobe.HarnessClaudeCode: true,
-	harnessprobe.HarnessCodex:      true,
-	harnessprobe.HarnessKimi:       true,
-	harnessprobe.HarnessGoose:      true,
-	harnessprobe.HarnessGemini:     true,
-	harnessprobe.HarnessGrok:       true,
+	harnessprobe.HarnessClaudeCode:  true,
+	harnessprobe.HarnessCodex:       true,
+	harnessprobe.HarnessKimi:        true,
+	harnessprobe.HarnessGoose:       true,
+	harnessprobe.HarnessGemini:      true,
+	harnessprobe.HarnessAntigravity: true,
+	harnessprobe.HarnessAgy:         true,
+	harnessprobe.HarnessGrok:        true,
 }
 
 // cmdHarness dispatches `reach harness <op>`.
 func cmdHarness(ctx context.Context, args []string) error {
 	if len(args) < 1 || args[0] != "verify" {
-		return errors.New("usage: reach harness verify claude|codex|kimi|goose|gemini|grok [--session NAME]")
+		return errors.New("usage: reach harness verify claude|codex|kimi|goose|gemini|antigravity|grok [--session NAME]")
 	}
 	if len(args) < 2 {
-		return errors.New("usage: reach harness verify claude|codex|kimi|goose|gemini|grok [--session NAME]")
+		return errors.New("usage: reach harness verify claude|codex|kimi|goose|gemini|antigravity|grok [--session NAME]")
 	}
 	if !verifiableHarnesses[args[1]] {
-		return fmt.Errorf("unknown harness %q: claude, codex, kimi, goose, gemini, and grok are verifiable", args[1])
+		return fmt.Errorf("unknown harness %q: claude, codex, kimi, goose, gemini, antigravity, and grok are verifiable", args[1])
 	}
 	return cmdHarnessVerify(ctx, args[1], args[2:])
 }
@@ -316,6 +318,9 @@ func gooseSeamNote() string { return harnessSeamNote(harnessprobe.HarnessGoose) 
 // geminiSeamNote describes the gemini shell seam for doctor.
 func geminiSeamNote() string { return harnessSeamNote(harnessprobe.HarnessGemini) }
 
+// antigravitySeamNote describes the antigravity shell seam for doctor.
+func antigravitySeamNote() string { return harnessSeamNote(harnessprobe.HarnessAntigravity) }
+
 func grokSeamNote() string { return harnessSeamNote(harnessprobe.HarnessGrok) }
 
 // harnessSeamNote describes a harness's shell seam for doctor, including the
@@ -337,6 +342,8 @@ func harnessSeamNote(harness string) string {
 		seam = "GOOSE_SHELL env var"
 	case harnessprobe.HarnessGemini:
 		seam = "PATH shim (run_shell_command)"
+	case harnessprobe.HarnessAntigravity, harnessprobe.HarnessAgy:
+		seam = "PATH shim"
 	case harnessprobe.HarnessGrok:
 		seam = "$SHELL / GROK_SHELL"
 	}

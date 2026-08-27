@@ -38,20 +38,23 @@ const bashShimName = "bash"
 const shimGuardEnv = "REACH_IN_SHELL_SHIM"
 
 // shimmedShellNames are the shell names reach installs on PATH and answers to.
-// zsh is the default login shell on macOS. Codex resolves the user's login
-// shell rather than hard-coding bash there, so omitting this alias lets its
-// tool calls bypass reach entirely on a stock macOS install.
-var shimmedShellNames = []string{bashShimName, "sh", "zsh"}
+// On Windows, harnesses like Antigravity may spawn powershell or cmd.
+var shimmedShellNames = []string{bashShimName, "sh", "zsh", "powershell", "pwsh", "cmd"}
 
 // isBashShimInvocation reports whether reach was started as a harness's shell.
 func isBashShimInvocation() bool {
-	base := programBase(os.Args[0])
-	return base == bashShimName || base == "sh" || base == "zsh"
+	base := strings.ToLower(programBase(os.Args[0]))
+	for _, name := range shimmedShellNames {
+		if base == name {
+			return true
+		}
+	}
+	return false
 }
 
-// runBashShim implements the `bash -c "<command>"` contract.
+// runBashShim implements the shell execution contract.
 //
-// Anything that is not a `-c` invocation — an interactive shell, a script file,
+// Anything that is not a `-c` / `-Command` / `/c` invocation — an interactive shell, a script file,
 // a version query — is handed to the real shell locally. reach redirects the
 // harness's commands, not every incidental use of a shell by unrelated tooling.
 func runBashShim(args []string) int {
@@ -69,6 +72,9 @@ func runBashShim(args []string) int {
 	command, ok := unwrapGrokEnvelope(args)
 	if !ok {
 		command = shellCommandArg(args)
+	}
+	if command == "" {
+		command = unwrapPowerShellOrCmd(args)
 	}
 	if command == "" {
 		return execRealShell(args)
@@ -92,7 +98,9 @@ func runBashShim(args []string) int {
 			os.Getenv("REACH_SESSION"), os.Getenv("REACH_SESSION"), sessErr)
 		return exitTransportFailure
 	}
-	return runOnTarget(shimContext(), sessionNameFromEnv(""), mapEmbeddedCwd(sess, command), "")
+	cmdToRun := mapEmbeddedCwd(sess, command)
+	cmdToRun = translateCommandForTarget(sess, cmdToRun)
+	return runOnTarget(shimContext(), sessionNameFromEnv(""), cmdToRun, "")
 }
 
 // unwrapGrokEnvelope extracts the user command from Grok Build's shell
@@ -184,6 +192,23 @@ func shellCommandArg(args []string) string {
 				return args[i+1]
 			}
 			return ""
+		}
+	}
+	return ""
+}
+
+// unwrapPowerShellOrCmd extracts commands passed via powershell -Command or cmd /c.
+func unwrapPowerShellOrCmd(args []string) string {
+	for i := 0; i < len(args); i++ {
+		a := strings.ToLower(args[i])
+		if a == "-c" || a == "-command" || a == "/c" || a == "/k" {
+			if i+1 < len(args) {
+				return strings.Join(args[i+1:], " ")
+			}
+			return ""
+		}
+		if strings.HasPrefix(a, "-command:") {
+			return strings.TrimPrefix(args[i], args[i][:len("-command:")])
 		}
 	}
 	return ""
@@ -281,6 +306,102 @@ func splitCdPrefix(command string) (dir, rest string, ok bool) {
 		return "", "", false
 	}
 	return dir, rest, true
+}
+
+// translateCommandForTarget maps Windows shell commands and backslash paths
+// to standard Linux / POSIX commands when targeting a remote Linux machine.
+func translateCommandForTarget(sess *session.Session, command string) string {
+	if sess == nil || sess.Target == nil {
+		return command
+	}
+	trimmed := strings.TrimSpace(command)
+
+	// If command is wrapped in cd, fix any backslashes in the directory
+	if strings.HasPrefix(trimmed, "cd ") || strings.HasPrefix(trimmed, "cd\t") {
+		parts := strings.SplitN(trimmed, "&&", 2)
+		if len(parts) == 2 {
+			cdPart := strings.TrimSpace(parts[0])
+			restPart := strings.TrimSpace(parts[1])
+			if strings.HasPrefix(cdPart, "cd ") {
+				targetDir := strings.TrimSpace(strings.TrimPrefix(cdPart, "cd "))
+				targetDir = strings.Trim(targetDir, `"'`)
+				targetDir = filepath.ToSlash(targetDir)
+				return fmt.Sprintf("cd %s && %s", shellQuote(targetDir), restPart)
+			}
+		}
+	}
+
+	fields := strings.Fields(trimmed)
+	if len(fields) == 0 {
+		return command
+	}
+	cmdName := strings.ToLower(fields[0])
+	switch cmdName {
+	case "dir":
+		if len(fields) == 1 {
+			return "ls -la"
+		}
+		var cleanArgs []string
+		for _, a := range fields[1:] {
+			if !strings.HasPrefix(a, "/") && !strings.HasPrefix(a, "-") {
+				cleanArgs = append(cleanArgs, filepath.ToSlash(a))
+			}
+		}
+		if len(cleanArgs) == 0 {
+			return "ls -la"
+		}
+		return "ls -la " + strings.Join(cleanArgs, " ")
+	case "type":
+		if len(fields) > 1 {
+			return "cat " + filepath.ToSlash(fields[1])
+		}
+	case "cls":
+		return "clear"
+	case "del":
+		if len(fields) > 1 {
+			return "rm -f " + filepath.ToSlash(fields[1])
+		}
+	case "get-childitem", "gci":
+		if len(fields) == 1 {
+			return "ls -la"
+		}
+		var cleanArgs []string
+		skipNext := false
+		for i, a := range fields[1:] {
+			if skipNext {
+				skipNext = false
+				continue
+			}
+			if strings.EqualFold(a, "-path") || strings.EqualFold(a, "-literalpath") {
+				skipNext = true
+				if i+2 < len(fields) {
+					cleanArgs = append(cleanArgs, filepath.ToSlash(fields[1+i+1]))
+				}
+				continue
+			}
+			if !strings.HasPrefix(a, "-") {
+				cleanArgs = append(cleanArgs, filepath.ToSlash(a))
+			}
+		}
+		if len(cleanArgs) == 0 {
+			return "ls -la"
+		}
+		return "ls -la " + strings.Join(cleanArgs, " ")
+	case "get-content", "gc":
+		if len(fields) > 1 {
+			for _, a := range fields[1:] {
+				if !strings.HasPrefix(a, "-") {
+					return "cat " + filepath.ToSlash(a)
+				}
+			}
+		}
+	case "set-location", "sl":
+		if len(fields) > 1 {
+			return "cd " + filepath.ToSlash(fields[1])
+		}
+	}
+
+	return command
 }
 
 // execRealShell replaces this process with the genuine shell, passing the
